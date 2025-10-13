@@ -44,6 +44,44 @@ interface Driver {
   online: boolean;
 }
 
+// ---------------- Event Interfaces ----------------
+interface RideStatusUpdate {
+  rideId: string;
+  status: Ride["status"];
+  timestamp: number;
+  previousStatus?: Ride["status"];
+}
+
+interface RideLocationUpdate {
+  rideId: string;
+  location: Location;
+  timestamp: number;
+  speed?: number;
+  heading?: number;
+}
+
+interface RideDriverUpdate {
+  rideId: string;
+  driverId: string;
+  driverInfo?: any;
+  timestamp: number;
+}
+
+interface RideDestinationUpdate {
+  rideId: string;
+  destinationIndex: number;
+  status: "pending" | "completed";
+  destination: Destination;
+  timestamp: number;
+}
+
+interface RideETAUpdate {
+  rideId: string;
+  eta: number; // in minutes
+  destinationIndex: number;
+  timestamp: number;
+}
+
 // ---------------- Memory Storage ----------------
 const drivers: Record<string, Driver> = {};
 const rides: Record<string, Ride> = {};
@@ -170,6 +208,56 @@ function emitRideDriver(rideId: string, driverId: string) {
   emojiLog("Driver Assigned 👨‍💼", payload);
 }
 
+function emitRideDestination(
+  rideId: string,
+  destinationIndex: number,
+  destination: Destination
+) {
+  const ride = rides[rideId];
+  if (!ride) return;
+
+  const payload = {
+    ride: {
+      rideId: ride.rideId,
+      userId: ride.userId,
+      driverId: ride.driverId,
+      status: ride.status,
+      driverLocation: ride.driverLocation,
+      pickupLocation: ride.pickupLocation,
+      destinations: ride.destinations,
+      currentIndex: ride.currentIndex,
+      createdAt: ride.createdAt,
+    },
+    timestamp: Date.now(),
+  };
+
+  if (ride.userId) io.to(ride.userId).emit("ride:destination", payload);
+  if (ride.driverId) io.to(ride.driverId).emit("ride:destination", payload);
+  emojiLog("Destination Updated 🎯", payload);
+}
+
+function emitRideETA(rideId: string, eta: number) {
+  const ride = rides[rideId];
+  if (!ride) return;
+
+  const payload = {
+    ride: {
+      rideId: ride.rideId,
+      userId: ride.userId,
+      driverId: ride.driverId,
+      status: ride.status,
+      driverLocation: ride.driverLocation,
+      pickupLocation: ride.pickupLocation,
+      destinations: ride.destinations,
+      currentIndex: ride.currentIndex,
+      createdAt: ride.createdAt,
+    },
+    timestamp: Date.now(),
+  };
+
+  if (ride.userId) io.to(ride.userId).emit("ride:eta", payload);
+  emojiLog("ETA Updated ⏱", payload);
+}
 
 // ---------------- Memory Management ----------------
 function cleanupOldRides() {
@@ -281,7 +369,7 @@ io.on("connection", (socket) => {
         // Emit complete ride object first
         socket.emit("ride:sync", {
           ride: activeRide,
-          timestamp: Date.now(),
+          timestamp: Date.now()
         });
 
         socket.emit("ride:status", {
@@ -467,7 +555,7 @@ io.on("connection", (socket) => {
       const candidates = Object.values(drivers)
         .filter(
           (d) =>
-            // d.online &&
+            d.online &&
             !Object.values(rides).some(
               (r) =>
                 r.driverId === d.driverId &&
@@ -606,7 +694,8 @@ io.on("connection", (socket) => {
       }
 
       ride.destinations[idx].status = "completed";
-   
+      emitRideDestination(rideId, idx, ride.destinations[idx]);
+
       if (idx < ride.destinations.length - 1) {
         ride.currentIndex = idx + 1;
         emojiLog("Destination Completed 🎯", { rideId, destinationIndex: idx });
@@ -692,6 +781,25 @@ io.on("connection", (socket) => {
     } catch (err) {
       console.error("❌ [updateLocation] Error updating location", err);
       if (callback) callback({ success: false, error: "Update failed" });
+    }
+  });
+
+  // Update ETA
+  socket.on("updateETA", ({ rideId, eta, destinationIndex }, callback) => {
+    try {
+      const ride = rides[rideId];
+      if (!ride) {
+        if (callback) callback({ success: false, error: "Ride not found" });
+        return;
+      }
+
+      emitRideETA(rideId, eta);
+      // emitRideETA(rideId, eta, destinationIndex);
+
+      if (callback) callback({ success: true });
+    } catch (err) {
+      console.error("❌ Error updateETA", err);
+      if (callback) callback({ success: false, error: "ETA update failed" });
     }
   });
 
