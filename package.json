@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "build": "tsc && cp src/serviceAccountKey.json dist/serviceAccountKey.json",
+    "build": "tsc && node copy-service-account.js",
     "start": "node dist/index.js",
     "dev": "nodemon --watch src --exec ts-node src/index.ts",
     "test": "echo \"Error: no test specified\" && exit 1"

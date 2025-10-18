@@ -5,7 +5,7 @@ import admin from "firebase-admin";
 import path from "path";
 
 // Initialize Firebase Admin
-const serviceAccountPath = path.join(__dirname, "serviceAccountKey.json");
+const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
 const serviceAccount = require(serviceAccountPath);
 
 admin.initializeApp({
