@@ -2,9 +2,11 @@ import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 import admin from "firebase-admin";
+import path from "path";
 
 // Initialize Firebase Admin
-const serviceAccount = require("../serviceAccountKey.json"); 
+const serviceAccountPath = path.join(__dirname, "serviceAccountKey.json");
+const serviceAccount = require(serviceAccountPath);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
