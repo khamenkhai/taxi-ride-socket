@@ -4,7 +4,7 @@ import { Server } from "socket.io";
 import admin from "firebase-admin";
 
 // Initialize Firebase Admin
-const serviceAccount = require("../serviceAccountKey.json"); // Replace with your service account path
+const serviceAccount = require("../serviceAccountKey.json"); 
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -157,7 +157,7 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const existingRide = rideDoc.data() as Ride;
+    const existingRide = rideDoc.data() as Ride; // <-- make sure this line exists
     existingRide.status = "accepted";
     existingRide.driverId = ride.driverId;
 
@@ -279,8 +279,6 @@ io.on("connection", (socket) => {
       }
     }
   );
-
-
 
   // ===========================================================
   // 📡 Driver Location Update (Realtime tracking)
