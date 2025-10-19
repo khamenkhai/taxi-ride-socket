@@ -388,7 +388,7 @@ app.get("/api/test-firebase", async (req, res) => {
 // 🚀 Start the server using your Wi-Fi IP address
 // ===========================================================
 const PORT = 3000;
-const HOST = "192.168.100.68";
+const HOST = process.env.HOST || "0.0.0.0";
 
 server.listen(PORT, HOST, () => {
   console.log(`🚀 Server is running at http://${HOST}:${PORT}`);
