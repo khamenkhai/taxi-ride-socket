@@ -44,6 +44,15 @@ console.log("📚 Firestore collections referenced.");
 io.on("connection", (socket) => {
   console.log(`🔌 User connected: ${socket.id}`);
 
+  // When client provides their userId and type after reconnect
+  socket.on(
+    "user:reconnect",
+    (data: { userId: string; type: "rider" | "driver" }) => {
+      console.log(`🔄 User reconnect event:`, data);
+      syncRideForUser(socket, data.userId, data.type);
+    }
+  );
+
   // ===========================================================
   // ✅ User joins their respective room
   // ===========================================================
@@ -223,6 +232,55 @@ io.on("connection", (socket) => {
       }
     }
   );
+
+  // ===========================================================
+  // 🔄 Auto-sync ride on client reconnect
+  // ===========================================================
+  async function syncRideForUser(
+    socket: any,
+    userId: string,
+    type: "rider" | "driver"
+  ) {
+    try {
+      console.log(`🔄 Attempting to sync ride for ${type} with ID: ${userId}`);
+
+      // 1️⃣ Query Firestore for an active ride associated with this user
+      const activeRideQuery = await ridesCollection
+        .where(type === "rider" ? "riderId" : "driverId", "==", userId)
+        .where("status", "in", ["driverArrived", "inProgress"])
+        .limit(1)
+        .get();
+
+      if (activeRideQuery.empty) {
+        console.log("⚪ No active ride found for this user.");
+        return;
+      }
+
+      const rideDoc = activeRideQuery.docs[0];
+      const rideData = rideDoc.data();
+
+      console.log(`🟢 Active ride found: ${rideDoc.id}`, rideData);
+
+      // 2️⃣ Join the user to their ride room
+      socket.join(rideDoc.id);
+      console.log(`🚪 ${type} joined ride room: ${rideDoc.id}`);
+
+      // 3️⃣ Emit current ride status to the user
+      const payload = {
+        rideId: rideDoc.id,
+        status: rideData.status,
+        driverId: rideData.driverId,
+        riderId: rideData.riderId,
+        driverLocation: rideData.driverLocation || null,
+        // include any other ride details you want to sync
+      };
+
+      socket.emit("ride:sync", payload);
+      console.log("✅ Ride sync payload sent to user.");
+    } catch (error) {
+      console.error("❌ ERROR syncing ride for user:", error);
+    }
+  }
 
   // ===========================================================
   // 🚫 Cancel ride
