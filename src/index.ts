@@ -277,11 +277,11 @@ io.on("connection", (socket) => {
 });
 
 // ===========================================================
-// 🚀 Start server
+// 🚀 Start the server using your Wi-Fi IP address
 // ===========================================================
 const PORT = 3000;
-const HOST = "192.168.100.76";
+const HOST = process.env.HOST || "0.0.0.0";
 
 server.listen(PORT, HOST, () => {
-  console.log(`🟢🚀 Server is running at http://${HOST}:${PORT}`);
+  console.log(`🚀 Server is running at http://${HOST}:${PORT}`);
 });
