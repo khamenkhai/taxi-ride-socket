@@ -4,6 +4,8 @@ import { Server } from "socket.io";
 import admin from "firebase-admin";
 
 // ⚠️ IMPORTANT: Replace this with your actual service account path or object
+
+// Initialize Firebase Admin
 const serviceAccount: any = {
   type: "service_account",
   project_id: "project2-f5cb2",
@@ -20,7 +22,6 @@ const serviceAccount: any = {
     "https://www.googleapis.com/robot/v1/metadata/x509/project2-service-account%40project2-f5cb2.iam.gserviceaccount.com",
   universe_domain: "googleapis.com",
 };
-// Initialize Firebase Admin
 console.log("🔥 Initializing Firebase Admin...");
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -49,7 +50,6 @@ io.on("connection", (socket) => {
     "user:reconnect",
     (data: { userId: string; type: "rider" | "driver" }) => {
       console.log(`🔄 User reconnect event:`, data);
-      syncRideForUser(socket, data.userId, data.type);
     }
   );
 
@@ -149,6 +149,14 @@ io.on("connection", (socket) => {
         );
         socket.emit("ride:accepted", acceptedPayload);
 
+        await ridesCollection.doc(data.rideId).set(
+          {
+            lastAccepted: data,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
         console.log(
           "📨 Notifications sent. Awaiting rider to join ride room..."
         );
@@ -172,10 +180,19 @@ io.on("connection", (socket) => {
   // ===========================================================
   socket.on(
     "driver:location",
-    (data: { rideId: string; location: { lat: number; lng: number } }) => {
+    async (data: {
+      rideId: string;
+      location: { lat: number; lng: number };
+    }) => {
       // console.log(`📍 Driver location update for ${data.rideId}: Lat ${data.location.lat}`); // Too verbose for frequent updates
+      await ridesCollection.doc(data.rideId).set(
+        {
+          lastDriverLocation: data.location,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
 
-      // Broadcast to ride room
       io.to(data.rideId).emit("ride:driverLocation", data.location);
       // console.log("📢 Location broadcasted.");
     }
@@ -222,6 +239,15 @@ io.on("connection", (socket) => {
         console.log(
           `📢 Broadcasting status '${data.status}' to ride room ${data.rideId}`
         );
+
+        await ridesCollection.doc(data.rideId).set(
+          {
+            lastStatus: data.status,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
         io.to(data.rideId).emit("ride:status", data.status);
         console.log("✅ Status broadcast complete.");
       } catch (error) {
@@ -232,55 +258,6 @@ io.on("connection", (socket) => {
       }
     }
   );
-
-  // ===========================================================
-  // 🔄 Auto-sync ride on client reconnect
-  // ===========================================================
-  async function syncRideForUser(
-    socket: any,
-    userId: string,
-    type: "rider" | "driver"
-  ) {
-    try {
-      console.log(`🔄 Attempting to sync ride for ${type} with ID: ${userId}`);
-
-      // 1️⃣ Query Firestore for an active ride associated with this user
-      const activeRideQuery = await ridesCollection
-        .where(type === "rider" ? "riderId" : "driverId", "==", userId)
-        .where("status", "in", ["driverArrived", "inProgress"])
-        .limit(1)
-        .get();
-
-      if (activeRideQuery.empty) {
-        console.log("⚪ No active ride found for this user.");
-        return;
-      }
-
-      const rideDoc = activeRideQuery.docs[0];
-      const rideData = rideDoc.data();
-
-      console.log(`🟢 Active ride found: ${rideDoc.id}`, rideData);
-
-      // 2️⃣ Join the user to their ride room
-      socket.join(rideDoc.id);
-      console.log(`🚪 ${type} joined ride room: ${rideDoc.id}`);
-
-      // 3️⃣ Emit current ride status to the user
-      const payload = {
-        rideId: rideDoc.id,
-        status: rideData.status,
-        driverId: rideData.driverId,
-        riderId: rideData.riderId,
-        driverLocation: rideData.driverLocation || null,
-        // include any other ride details you want to sync
-      };
-
-      socket.emit("ride:sync", payload);
-      console.log("✅ Ride sync payload sent to user.");
-    } catch (error) {
-      console.error("❌ ERROR syncing ride for user:", error);
-    }
-  }
 
   // ===========================================================
   // 🚫 Cancel ride
@@ -297,31 +274,74 @@ io.on("connection", (socket) => {
       );
 
       try {
-        // Update in Firestore
         console.log(
-          `💾 Updating Firestore for cancellation of ${data.rideId}...`
+          `💾 Checking Firestore for ride cancellation: ${data.rideId}...`
         );
-        await ridesCollection.doc(data.rideId).update({
-          status: "cancelled",
-          cancelReason: data.reason || "No reason provided",
-          cancelledBy: data.cancelledBy,
-          cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-        console.log("✔️ Firestore cancellation successful.");
 
-        // Notify both rider & driver in the same ride room
-        console.log(`📢 Broadcasting 'ride:cancelled' to room ${data.rideId}`);
-        io.to(data.rideId).emit("ride:cancelled", {
-          rideId: data.rideId,
-          cancelledBy: data.cancelledBy,
-          reason: data.reason,
-        });
-        console.log("✅ Cancellation broadcast complete.");
+        const rideDoc = await ridesCollection.doc(data.rideId).get();
+        if (!rideDoc.exists) {
+          console.warn(
+            `⚠️ Ride doc ${data.rideId} does not exist. It will be created.`
+          );
+        } else {
+          console.log(
+            `✅ Ride doc ${data.rideId} exists. Proceeding to update.`
+          );
+        }
+
+        await ridesCollection.doc(data.rideId).set(
+          {
+            lastCancelled: data,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        console.log("✔️ Firestore cancellation successful.");
       } catch (error) {
         console.error(
           `❌ ERROR processing ride cancellation for ${data.rideId}:`,
           error
         );
+      }
+    }
+  );
+
+  socket.on(
+    "user:reconnect",
+    async (data: {
+      userId: string;
+      type: "rider" | "driver";
+      rideId?: string;
+    }) => {
+      console.log("User reconnecting:", data);
+
+      socket.join(data.userId);
+      if (data.type === "driver") socket.join("drivers");
+
+      if (data.rideId) {
+        try {
+          const rideDoc = await ridesCollection.doc(data.rideId).get();
+          if (rideDoc.exists) {
+            const rideData = rideDoc.data();
+
+            // Emit the last events if available
+            if (rideData?.lastStatus) {
+              socket.emit("ride:status", rideData.lastStatus);
+            }
+            if (rideData?.lastDriverLocation) {
+              socket.emit("ride:driverLocation", rideData.lastDriverLocation);
+            }
+            if (rideData?.lastAccepted) {
+              socket.emit("ride:accepted", rideData.lastAccepted);
+            }
+            if (rideData?.lastCancelled) {
+              socket.emit("ride:cancelled", rideData.lastCancelled);
+            }
+          }
+        } catch (error) {
+          console.error("Error fetching last ride events on reconnect:", error);
+        }
       }
     }
   );
