@@ -4,7 +4,6 @@ import { Server } from "socket.io";
 import admin from "firebase-admin";
 
 // ⚠️ IMPORTANT: Replace this with your actual service account path or object
-
 // Initialize Firebase Admin
 const serviceAccount: any = {
   type: "service_account",
@@ -22,6 +21,10 @@ const serviceAccount: any = {
     "https://www.googleapis.com/robot/v1/metadata/x509/project2-service-account%40project2-f5cb2.iam.gserviceaccount.com",
   universe_domain: "googleapis.com",
 };
+
+// Map<rideRequestId, NodeJS.Timeout>
+const pendingRideRequests: Map<string, NodeJS.Timeout> = new Map();
+
 console.log("🔥 Initializing Firebase Admin...");
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -36,7 +39,6 @@ const io = new Server(server, { cors: { origin: "*" } });
 console.log("🌐 Socket.IO Server and CORS configured.");
 
 const ridesCollection = db.collection("rides");
-const rideRequestsCollection = db.collection("rideRequests");
 console.log("📚 Firestore collections referenced.");
 
 // ===========================================================
@@ -71,25 +73,47 @@ io.on("connection", (socket) => {
     }
   );
 
-  // ===========================================================
-  // 📲 Rider requests a ride
-  // ===========================================================
-  // socket.on("ride:request", async (rideRequestId: string) => {
-  //   console.log(`📲 New ride request received: ${rideRequestId}`);
-
-  //   // Broadcast to all drivers
-  //   console.log("📡 Broadcasting 'ride:requested' to all drivers...");
-  //   socket.to("drivers").emit("ride:requested", rideRequestId);
-  //   console.log("🚀 Broadcast complete.");
-  // });
-
   socket.on("ride:request", async (rideRequestData) => {
     console.log(`📲 New ride request received from rider:`, rideRequestData);
 
-    // Emit the full ride request payload to all drivers
-    console.log("📡 Sending 'ride:requested' to all drivers...");
-    socket.to("drivers").emit("ride:requested", rideRequestData);
-    console.log("🚀 Ride request sent to drivers successfully.");
+    const rideRequestId = rideRequestData.rideRequestId;
+
+    try {
+      // Get all online drivers
+      const snapshot = await db
+        .collection("drivers")
+        .where("online", "==", true)
+        .get();
+
+      if (!snapshot.empty) {
+        snapshot.docs.forEach((doc) => {
+          const driverSocketId = doc.data().socketId;
+          if (driverSocketId) {
+            io.to(driverSocketId).emit("ride:requested", rideRequestData);
+            console.log(`📡 Ride request sent to driver ${doc.id}`);
+          }
+        });
+
+        // Start 10-second timeout for this ride request
+        const timer = setTimeout(async () => {
+          console.log(`⏰ Ride request ${rideRequestId} timed out!`);
+
+          // Notify rider or handle fallback logic
+          io.to(rideRequestData.riderId).emit("ride:timeout", {
+            rideRequestId,
+            message: "No driver accepted in time",
+          });
+
+          pendingRideRequests.delete(rideRequestId);
+        }, 10000); // 10 seconds
+
+        pendingRideRequests.set(rideRequestId, timer);
+      } else {
+        console.log("⚠️ No online drivers found for this ride request");
+      }
+    } catch (error) {
+      console.error("❌ Error sending ride request to online drivers:", error);
+    }
   });
 
   // ===========================================================
@@ -152,6 +176,7 @@ io.on("connection", (socket) => {
         await ridesCollection.doc(data.rideId).set(
           {
             lastAccepted: data,
+            status: "accepted",
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           },
           { merge: true }
@@ -242,7 +267,7 @@ io.on("connection", (socket) => {
 
         await ridesCollection.doc(data.rideId).set(
           {
-            lastStatus: data.status,
+            status: data.status,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           },
           { merge: true }
@@ -262,50 +287,23 @@ io.on("connection", (socket) => {
   // ===========================================================
   // 🚫 Cancel ride
   // ===========================================================
-  socket.on(
-    "ride:cancel",
-    async (data: {
-      rideId: string;
-      cancelledBy: "rider" | "driver";
-      reason?: string;
-    }) => {
-      console.log(
-        `🔥🚫 Ride cancellation received for ${data.rideId} by ${data.cancelledBy}`
+  socket.on("ride:cancel", async (data) => {
+    try {
+      await ridesCollection.doc(data.rideId).set(
+        {
+          lastCancelled: data,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
       );
 
-      try {
-        console.log(
-          `💾 Checking Firestore for ride cancellation: ${data.rideId}...`
-        );
-
-        const rideDoc = await ridesCollection.doc(data.rideId).get();
-        if (!rideDoc.exists) {
-          console.warn(
-            `⚠️ Ride doc ${data.rideId} does not exist. It will be created.`
-          );
-        } else {
-          console.log(
-            `✅ Ride doc ${data.rideId} exists. Proceeding to update.`
-          );
-        }
-
-        await ridesCollection.doc(data.rideId).set(
-          {
-            lastCancelled: data,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          },
-          { merge: true }
-        );
-
-        console.log("✔️ Firestore cancellation successful.");
-      } catch (error) {
-        console.error(
-          `❌ ERROR processing ride cancellation for ${data.rideId}:`,
-          error
-        );
-      }
+      // ⚡ Emit cancellation immediately to ride room
+      io.to(data.rideId).emit("ride:cancelled", data);
+      console.log(`📢 Ride cancelled emitted to room ${data.rideId}`);
+    } catch (error) {
+      console.error("❌ Error processing ride cancellation:", error);
     }
-  );
+  });
 
   socket.on(
     "user:reconnect",
@@ -326,15 +324,19 @@ io.on("connection", (socket) => {
             const rideData = rideDoc.data();
 
             // Emit the last events if available
-            if (rideData?.lastStatus) {
-              socket.emit("ride:status", rideData.lastStatus);
+            if (rideData?.status) {
+              if (rideData.status == "accepted") {
+                socket.emit("ride:accepted", rideData.lastAccepted);
+              } else {
+                socket.emit("ride:status", rideData.status);
+              }
             }
             if (rideData?.lastDriverLocation) {
               socket.emit("ride:driverLocation", rideData.lastDriverLocation);
             }
-            if (rideData?.lastAccepted) {
-              socket.emit("ride:accepted", rideData.lastAccepted);
-            }
+            // if (rideData?.lastAccepted) {
+            //   socket.emit("ride:accepted", rideData.lastAccepted);
+            // }
             if (rideData?.lastCancelled) {
               socket.emit("ride:cancelled", rideData.lastCancelled);
             }
@@ -346,19 +348,101 @@ io.on("connection", (socket) => {
     }
   );
 
-  // ===========================================================
-  // ❌ Disconnect cleanup
-  // ===========================================================
-  socket.on("disconnect", () => {
-    console.log(`🚪❌ User disconnected: ${socket.id}`);
+  // Driver comes online
+  socket.on("driver:online", async (data: { driverId: string }) => {
+    console.log(`🟢 Driver online: ${data.driverId}`);
+    socket.join("drivers");
+
+    try {
+      await db.collection("drivers").doc(data.driverId).set(
+        {
+          online: true,
+          socketId: socket.id, // store socketId in Firestore
+          lastOnline: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      io.emit("driver:statusUpdate", { driverId: data.driverId, online: true });
+      console.log(`📢 Driver ${data.driverId} marked as online`);
+    } catch (error) {
+      console.error(`❌ Error setting driver online status:`, error);
+    }
   });
+
+  // Driver goes offline manually
+  socket.on("driver:offline", async (data: { driverId: string }) => {
+    console.log(`🔴 Driver offline: ${data.driverId}`);
+    socket.leave("drivers");
+
+    try {
+      await db.collection("drivers").doc(data.driverId).set(
+        {
+          online: false,
+          socketId: null, // clear socketId
+          lastOffline: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      io.emit("driver:statusUpdate", {
+        driverId: data.driverId,
+        online: false,
+      });
+      console.log(`📢 Driver ${data.driverId} marked as offline`);
+    } catch (error) {
+      console.error(`❌ Error setting driver offline status:`, error);
+    }
+  });
+
+  // Automatically mark driver offline on disconnect
+  socket.on("disconnect", async () => {
+    console.log(`🚪❌ User disconnected: ${socket.id}`);
+
+    try {
+      // Find driver by socketId
+      const snapshot = await db
+        .collection("drivers")
+        .where("socketId", "==", socket.id)
+        .limit(1)
+        .get();
+
+      if (!snapshot.empty) {
+        const doc = snapshot.docs[0];
+        const driverId = doc.id;
+
+        await db.collection("drivers").doc(driverId).set(
+          {
+            online: false,
+            socketId: null,
+            lastOffline: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        io.emit("driver:statusUpdate", { driverId, online: false });
+        console.log(
+          `📢 Driver ${driverId} automatically marked offline on disconnect`
+        );
+      }
+    } catch (error) {
+      console.error("❌ Error marking driver offline on disconnect:", error);
+    }
+  });
+
+  // // ===========================================================
+  // // ❌ Disconnect cleanup
+  // // ===========================================================
+  // socket.on("disconnect", () => {
+  //   console.log(`🚪❌ User disconnected: ${socket.id}`);
+  // });
 });
 
 // ===========================================================
 // 🚀 Start the server using your Wi-Fi IP address
 // ===========================================================
 const PORT = 3000;
-const HOST = process.env.HOST || "0.0.0.0";
+const HOST = "192.168.100.76";
 
 server.listen(PORT, HOST, () => {
   console.log(`🚀 Server is running at http://${HOST}:${PORT}`);

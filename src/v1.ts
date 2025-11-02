@@ -3,6 +3,7 @@ import http from "http";
 import { Server } from "socket.io";
 import admin from "firebase-admin";
 
+// ⚠️ IMPORTANT: Replace this with your actual service account path or object
 // Initialize Firebase Admin
 const serviceAccount : any = {
   "type": "service_account",
@@ -18,377 +19,337 @@ const serviceAccount : any = {
   "universe_domain": "googleapis.com"
 }
 
+
+console.log("🔥 Initializing Firebase Admin...");
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
+console.log("✅ Firebase Admin initialized.");
 
 const db = admin.firestore();
 
-interface Location {
-  lat: number;
-  lng: number;
-}
-
-interface Destination {
-  lat: number;
-  lng: number;
-  address?: string;
-}
-
-interface Ride {
-  rideId: string;
-  userId: string;
-  driverId?: string;
-  status?:
-    | "requested"
-    | "accepted"
-    | "driverArrived"
-    | "inProgress"
-    | "completed"
-    | "cancelled";
-  driverLocation?: Location;
-  pickupLocation?: Location;
-  destinations?: Destination[];
-  currentIndex?: number;
-  createdAt?: number;
-}
-
 const app = express();
 const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+console.log("🌐 Socket.IO Server and CORS configured.");
 
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-  },
-});
-
-interface User {
-  id: string;
-  type: "rider" | "driver";
-  socketId: string;
-}
-
-// Firestore collections
 const ridesCollection = db.collection("rides");
-const usersCollection = db.collection("connectedUsers");
+const rideRequestsCollection = db.collection("rideRequests");
+console.log("📚 Firestore collections referenced.");
 
-const connectedUsers = new Map<string, User>();
-
-async function getActiveRideForUser(userId: string): Promise<Ride | null> {
-  const activeStatuses = [
-    "requested",
-    "accepted",
-    "driverArrived",
-    "inProgress",
-  ];
-
-  const snapshot = await ridesCollection
-    .where("status", "in", activeStatuses)
-    .where("userId", "==", userId)
-    .limit(1)
-    .get();
-
-  if (!snapshot.empty) {
-    return snapshot.docs[0].data() as Ride;
-  }
-  return null;
-}
-
-async function getActiveRideForDriver(driverId: string): Promise<Ride | null> {
-  const activeStatuses = [
-    "requested",
-    "accepted",
-    "driverArrived",
-    "inProgress",
-  ];
-
-  const snapshot = await ridesCollection
-    .where("status", "in", activeStatuses)
-    .where("driverId", "==", driverId)
-    .limit(1)
-    .get();
-
-  if (!snapshot.empty) {
-    return snapshot.docs[0].data() as Ride;
-  }
-  return null;
-}
-
+// ===========================================================
+// 🔌 Socket Connection Handler
+// ===========================================================
 io.on("connection", (socket) => {
   console.log(`🔌 User connected: ${socket.id}`);
 
-  // ===========================================================
-  // ✅ User join and room management
-  // ===========================================================
-  socket.on("user:join", async (user: User) => {
-    console.log(`👤 User joined:`, user);
-    connectedUsers.set(user.id, { ...user, socketId: socket.id });
-    socket.join(user.id);
-
-    // Store user in Firestore
-    await usersCollection.doc(user.id).set(
-      {
-        ...user,
-        socketId: socket.id,
-        isConnected: true,
-        connectedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-
-    if (user.type === "driver") {
-      socket.join("drivers");
-      console.log(`🚗 Driver ${user.id} joined drivers room`);
+  // When client provides their userId and type after reconnect
+  socket.on(
+    "user:reconnect",
+    (data: { userId: string; type: "rider" | "driver" }) => {
+      console.log(`🔄 User reconnect event:`, data);
     }
-  });
+  );
 
   // ===========================================================
-  // ✅ Rider requests a ride
+  // ✅ User joins their respective room
   // ===========================================================
-  socket.on("ride:request", async (ride: Ride) => {
-    console.log("📲 New ride request received:", ride);
-    ride.status = "requested";
-    ride.createdAt = Date.now();
+  socket.on(
+    "user:join",
+    (data: { userId: string; type: "rider" | "driver" }) => {
+      console.log(`👤 ${data.type} is attempting to join room: ${data.userId}`);
+      socket.join(data.userId);
+      console.log(`🚪 Joined user room: ${data.userId}`);
 
-    // Store ride in Firestore
-    await ridesCollection.doc(ride.rideId).set(ride);
+      if (data.type === "driver") {
+        socket.join("drivers");
+        console.log("🚕 Driver also joined 'drivers' room.");
+      }
+      console.log(`✅ ${data.type} joined successfully.`);
+    }
+  );
 
-    console.log("📡 Broadcasting to drivers 🚘:", ride);
-    socket.to("drivers").emit("ride:requested", ride);
+  socket.on("ride:request", async (rideRequestData) => {
+    console.log(`📲 New ride request received from rider:`, rideRequestData);
+
+    // Emit the full ride request payload to all drivers
+    console.log("📡 Sending 'ride:requested' to all drivers...");
+    socket.to("drivers").emit("ride:requested", rideRequestData);
+    console.log("🚀 Ride request sent to drivers successfully.");
   });
 
   // ===========================================================
   // ✅ Driver accepts ride
   // ===========================================================
-  socket.on("ride:accept", async (ride: Ride) => {
-    console.log("✅ Ride accepted by driver:", ride);
+  socket.on(
+    "ride:accept",
+    async (data: {
+      rideRequestId: string;
+      rideId: string;
+      driverLocation: { lat: number; lng: number };
+      driverId: string;
+      riderId: string;
+    }) => {
+      try {
+        console.log("💚 Ride ACCEPT event received");
+        console.log("🔍 Full payload:", JSON.stringify(data, null, 2));
 
-    const rideDoc = await ridesCollection.doc(ride.rideId).get();
-    if (!rideDoc.exists) {
-      console.log("❌ Ride not found:", ride.rideId);
-      return;
+        // 1️⃣ Driver joins the ride room
+        console.log(`🔗 Driver joining ride room: ${data.rideId}`);
+        socket.join(data.rideId);
+        console.log(
+          `🚗 Driver socket ${socket.id} joined room: ${data.rideId}`
+        );
+
+        // 2️⃣ Log current room memberships
+        const driverRoomSockets = await io.in(data.driverId).allSockets();
+        const rideRoomSockets = await io.in(data.rideId).allSockets();
+        console.log(
+          `🟢 Sockets in driverId room (${data.driverId}):`,
+          driverRoomSockets
+        );
+        console.log(
+          `🟢 Sockets in ride room (${data.rideId}):`,
+          rideRoomSockets
+        );
+
+        // 3️⃣ Notify rider and driver
+        const acceptedPayload = {
+          rideId: data.rideId,
+          driverLocation: data.driverLocation,
+        };
+
+        console.log(
+          `✉️ Sending 'ride:accepted' to rider room: ${data.riderId}`
+        );
+        io.to(data.riderId).emit("ride:accepted", acceptedPayload);
+
+        console.log(
+          `✉️ Sending 'ride:accepted' to driver room: ${data.driverId}`
+        );
+        io.to(data.driverId).emit("ride:accepted", acceptedPayload);
+
+        // 4️⃣ Also emit directly to this socket as a fallback
+        console.log(
+          `✉️ Sending 'ride:accepted' directly to driver socket: ${socket.id}`
+        );
+        socket.emit("ride:accepted", acceptedPayload);
+
+        await ridesCollection.doc(data.rideId).set(
+          {
+            lastAccepted: data,
+            status : "accepted",
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        console.log(
+          "📨 Notifications sent. Awaiting rider to join ride room..."
+        );
+      } catch (error) {
+        console.error("❌ ERROR in ride:accept handler:", error);
+      }
     }
+  );
 
-    const existingRide = rideDoc.data() as Ride; // <-- make sure this line exists
-    existingRide.status = "accepted";
-    existingRide.driverId = ride.driverId;
-    existingRide.driverLocation = ride.driverLocation;
-
-    // Update ride in Firestore
-    await ridesCollection.doc(ride.rideId).update({
-      status: "accepted",
-      driverId: ride.driverId,
-    });
-
-    console.log("📤 Sending ride:accepted to rider and driver:", existingRide);
-    io.to(existingRide.userId).emit("ride:accepted", existingRide);
-    io.to(ride.driverId!).emit("ride:accepted", existingRide);
+  // ===========================================================
+  // 👥 Common ride room join (for both driver & rider)
+  // ===========================================================
+  socket.on("ride:join", (data: { rideId: string }) => {
+    console.log(`🤝 Request to join ride room: ${data.rideId}`);
+    socket.join(data.rideId);
+    console.log(`✅ ${socket.id} joined ride room: ${data.rideId}`);
   });
 
   // ===========================================================
-  // ✅ Driver arrived
+  // 📍 Driver location updates (realtime)
   // ===========================================================
-  socket.on("ride:driverArrived", async (data: { rideId: string }) => {
-    console.log("📍 Driver arrived for ride:", data);
+  socket.on(
+    "driver:location",
+    async (data: {
+      rideId: string;
+      location: { lat: number; lng: number };
+    }) => {
+      // console.log(`📍 Driver location update for ${data.rideId}: Lat ${data.location.lat}`); // Too verbose for frequent updates
+      await ridesCollection.doc(data.rideId).set(
+        {
+          lastDriverLocation: data.location,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
 
-    const rideDoc = await ridesCollection.doc(data.rideId).get();
-    if (!rideDoc.exists) return;
-
-    const ride = rideDoc.data() as Ride;
-    if (ride && ride.status === "accepted") {
-      // Update ride status in Firestore
-      await ridesCollection.doc(data.rideId).update({
-        status: "driverArrived",
-      });
-
-      ride.status = "driverArrived";
-      console.log("📤 Notifying rider driver has arrived:", ride);
-      io.to(ride.userId).emit("ride:update", ride);
-      io.to(ride.driverId || "").emit("ride:update", ride);
+      io.to(data.rideId).emit("ride:driverLocation", data.location);
+      // console.log("📢 Location broadcasted.");
     }
-  });
+  );
 
   // ===========================================================
-  // ✅ Driver starts the ride (In Progress)
+  // 🚦 Ride status updates
   // ===========================================================
-  socket.on("ride:inProgress", async (data: { rideId: string }) => {
-    console.log("🚦 Ride in progress:", data);
+  socket.on(
+    "ride:status",
+    async (data: {
+      rideId: string;
+      status: "driverArrived" | "inProgress" | "completed" | "cancelled";
+    }) => {
+      console.log(
+        `🔄 Ride status update received for ${data.rideId}: New status -> ${data.status}`
+      );
 
-    const rideDoc = await ridesCollection.doc(data.rideId).get();
-    if (!rideDoc.exists) return;
+      try {
+        // Update in Firestore
+        console.log(`💾 Updating Firestore status for ${data.rideId}...`);
+        // await ridesCollection.doc(data.rideId).update({
+        //   status: data.status,
+        //   updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        // });
+        const rideDoc = await ridesCollection.doc(data.rideId).get();
+        if (rideDoc.exists) {
+          await ridesCollection.doc(data.rideId).update({
+            status: data.status,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        } else {
+          console.warn("Ride doc not found, creating new one...");
+          await ridesCollection.doc(data.rideId).set({
+            status: data.status,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
 
-    const ride = rideDoc.data() as Ride;
-    if (ride && ride.status === "driverArrived") {
-      // Update ride status in Firestore
-      await ridesCollection.doc(data.rideId).update({
-        status: "inProgress",
-      });
+        console.log("✔️ Firestore update successful.");
 
-      ride.status = "inProgress";
-      console.log("📤 Updating rider and driver ride status:", ride);
-      io.to(ride.userId).emit("ride:update", ride);
-      if (ride.driverId) io.to(ride.driverId).emit("ride:update", ride);
+        // Broadcast to ride room
+        console.log(
+          `📢 Broadcasting status '${data.status}' to ride room ${data.rideId}`
+        );
+
+        await ridesCollection.doc(data.rideId).set(
+          {
+            status: data.status,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        io.to(data.rideId).emit("ride:status", data.status);
+        console.log("✅ Status broadcast complete.");
+      } catch (error) {
+        console.error(
+          `❌ ERROR updating ride status for ${data.rideId}:`,
+          error
+        );
+      }
     }
-  });
+  );
 
   // ===========================================================
-  // ✅ Ride complete
-  // ===========================================================
-  socket.on("ride:complete", async (rideId: string) => {
-    console.log("🏁 Ride completed:", rideId);
-
-    const rideDoc = await ridesCollection.doc(rideId).get();
-    if (!rideDoc.exists) return;
-
-    const ride = rideDoc.data() as Ride;
-    if (ride) {
-      // Update ride status in Firestore
-      await ridesCollection.doc(rideId).update({
-        status: "completed",
-        completedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-      ride.status = "completed";
-      console.log("📤 Notifying both parties of completion:", ride);
-      io.to(ride.userId).emit("ride:update", ride);
-      if (ride.driverId) io.to(ride.driverId).emit("ride:update", ride);
-    }
-  });
-
-  // ===========================================================
-  // ✅ Ride cancel
+  // 🚫 Cancel ride
   // ===========================================================
   socket.on(
     "ride:cancel",
-    async (data: { rideId: string; reason?: string }) => {
-      console.log("🚫 Ride cancelled:", data);
+    async (data: {
+      rideId: string;
+      cancelledBy: "rider" | "driver";
+      reason?: string;
+    }) => {
+      console.log(
+        `🔥🚫 Ride cancellation received for ${data.rideId} by ${data.cancelledBy}`
+      );
 
-      const rideDoc = await ridesCollection.doc(data.rideId).get();
-      if (!rideDoc.exists) return;
+      try {
+        console.log(
+          `💾 Checking Firestore for ride cancellation: ${data.rideId}...`
+        );
 
-      const ride = rideDoc.data() as Ride;
-      if (ride) {
-        // Update ride status in Firestore
-        await ridesCollection.doc(data.rideId).update({
-          status: "cancelled",
-          cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
-          cancelReason: data.reason,
-        });
+        const rideDoc = await ridesCollection.doc(data.rideId).get();
+        if (!rideDoc.exists) {
+          console.warn(
+            `⚠️ Ride doc ${data.rideId} does not exist. It will be created.`
+          );
+        } else {
+          console.log(
+            `✅ Ride doc ${data.rideId} exists. Proceeding to update.`
+          );
+        }
 
-        ride.status = "cancelled";
-        console.log("📤 Notifying user and driver of cancellation:", {
-          ...ride,
-          reason: data.reason,
-        });
-        io.to(ride.userId).emit("ride:cancelled", {
-          ...ride,
-          reason: data.reason,
-        });
-        if (ride.driverId)
-          io.to(ride.driverId).emit("ride:cancelled", {
-            ...ride,
-            reason: data.reason,
-          });
+        await ridesCollection.doc(data.rideId).set(
+          {
+            lastCancelled: data,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        console.log("✔️ Firestore cancellation successful.");
+      } catch (error) {
+        console.error(
+          `❌ ERROR processing ride cancellation for ${data.rideId}:`,
+          error
+        );
       }
     }
   );
 
-  // ===========================================================
-  // 📡 Driver Location Update (Realtime tracking)
-  // ===========================================================
   socket.on(
-    "driver:locationUpdate",
-    async (data: { driverId: string; location: Location }) => {
-      console.log("📍 Driver location update:", data);
+    "user:reconnect",
+    async (data: {
+      userId: string;
+      type: "rider" | "driver";
+      rideId?: string;
+    }) => {
+      console.log("User reconnecting:", data);
 
-      // Get all active rides for this driver
-      const ridesSnapshot = await ridesCollection
-        .where("driverId", "==", data.driverId)
-        .where("status", "in", ["accepted", "driverArrived", "inProgress"])
-        .get();
+      socket.join(data.userId);
+      if (data.type === "driver") socket.join("drivers");
 
-      ridesSnapshot.forEach(async (doc) => {
-        const ride = doc.data() as Ride;
+      if (data.rideId) {
+        try {
+          const rideDoc = await ridesCollection.doc(data.rideId).get();
+          if (rideDoc.exists) {
+            const rideData = rideDoc.data();
 
-        // Update driver location in Firestore
-        await ridesCollection.doc(doc.id).update({
-          driverLocation: data.location,
-        });
-
-        console.log("📤 Sending location to rider:", {
-          driverId: data.driverId,
-          location: data.location,
-        });
-        io.to(ride.userId).emit("ride:driverLocation", {
-          driverId: data.driverId,
-          location: data.location,
-        });
-      });
+            // Emit the last events if available
+            if (rideData?.status) {
+              if (rideData.status == "accepted") {
+                socket.emit("ride:accepted", rideData.lastAccepted);
+              } else {
+                socket.emit("ride:status", rideData.status);
+              }
+            }
+            if (rideData?.lastDriverLocation) {
+              socket.emit("ride:driverLocation", rideData.lastDriverLocation);
+            }
+            // if (rideData?.lastAccepted) {
+            //   socket.emit("ride:accepted", rideData.lastAccepted);
+            // }
+            if (rideData?.lastCancelled) {
+              socket.emit("ride:cancelled", rideData.lastCancelled);
+            }
+          }
+        } catch (error) {
+          console.error("Error fetching last ride events on reconnect:", error);
+        }
+      }
     }
   );
 
   // ===========================================================
-  // ✅ Disconnect cleanup
+  // ❌ Disconnect cleanup
   // ===========================================================
-  socket.on("disconnect", async () => {
-    console.log(`❌ User disconnected: ${socket.id}`);
-    for (const [userId, user] of connectedUsers.entries()) {
-      if (user.socketId === socket.id) {
-        console.log(`🗑️ Removing disconnected user: ${userId}`);
-        connectedUsers.delete(userId);
-
-        // Remove user from Firestore or mark as disconnected
-        await usersCollection.doc(userId).update({
-          isConnected: false,
-          disconnectedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-        break;
-      }
-    }
+  socket.on("disconnect", () => {
+    console.log(`🚪❌ User disconnected: ${socket.id}`);
   });
-});
-
-// Test Firebase Connection
-app.get("/api/test-firebase", async (req, res) => {
-  try {
-    // Test if we can write to Firestore
-    const testRef = db.collection("testConnection").doc("ping");
-    await testRef.set({
-      message: "Firebase connection test",
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      status: "success",
-    });
-
-    // Test if we can read from Firestore
-    const doc = await testRef.get();
-
-    if (doc.exists) {
-      res.json({
-        success: true,
-        message: "✅ Firebase connection is working!",
-        data: doc.data(),
-      });
-    } else {
-      res.status(500).json({
-        success: false,
-        message: "❌ Firebase write succeeded but read failed",
-      });
-    }
-  } catch (error: any) {
-    console.error("Firebase test error:", error);
-    res.status(500).json({
-      success: false,
-      message: "❌ Firebase connection failed",
-      error: error.message,
-    });
-  }
 });
 
 // ===========================================================
 // 🚀 Start the server using your Wi-Fi IP address
 // ===========================================================
 const PORT = 3000;
-const HOST = process.env.HOST || "0.0.0.0";
+const HOST = "192.168.100.76";
 
 server.listen(PORT, HOST, () => {
   console.log(`🚀 Server is running at http://${HOST}:${PORT}`);
