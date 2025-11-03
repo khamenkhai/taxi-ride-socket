@@ -209,7 +209,7 @@ io.on("connection", (socket) => {
       rideId: string;
       location: { lat: number; lng: number };
     }) => {
-      // console.log(`📍 Driver location update for ${data.rideId}: Lat ${data.location.lat}`); // Too verbose for frequent updates
+      console.log(`📍 Driver location update for ${data.rideId}: Lat ${data.location.lat}`); // Too verbose for frequent updates
       await ridesCollection.doc(data.rideId).set(
         {
           lastDriverLocation: data.location,
@@ -291,15 +291,15 @@ io.on("connection", (socket) => {
     try {
       await ridesCollection.doc(data.rideId).set(
         {
+          status : "cencelled",
           lastCancelled: data,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
         { merge: true }
       );
-
       // ⚡ Emit cancellation immediately to ride room
       io.to(data.rideId).emit("ride:cancelled", data);
-      console.log(`📢 Ride cancelled emitted to room ${data.rideId}`);
+      console.log(`❌ Ride cancelled broadcasted in ride room: ${data.rideId}`);
     } catch (error) {
       console.error("❌ Error processing ride cancellation:", error);
     }
@@ -322,7 +322,11 @@ io.on("connection", (socket) => {
           const rideDoc = await ridesCollection.doc(data.rideId).get();
           if (rideDoc.exists) {
             const rideData = rideDoc.data();
-
+            if (rideData?.lastCancelled) {
+              socket.emit("ride:cancelled", rideData.lastCancelled);
+              return;
+            }
+          
             // Emit the last events if available
             if (rideData?.status) {
               if (rideData.status == "accepted") {
@@ -333,12 +337,6 @@ io.on("connection", (socket) => {
             }
             if (rideData?.lastDriverLocation) {
               socket.emit("ride:driverLocation", rideData.lastDriverLocation);
-            }
-            // if (rideData?.lastAccepted) {
-            //   socket.emit("ride:accepted", rideData.lastAccepted);
-            // }
-            if (rideData?.lastCancelled) {
-              socket.emit("ride:cancelled", rideData.lastCancelled);
             }
           }
         } catch (error) {
@@ -442,7 +440,7 @@ io.on("connection", (socket) => {
 // 🚀 Start the server using your Wi-Fi IP address
 // ===========================================================
 const PORT = 3000;
-const HOST = "192.168.100.76";
+const HOST = "0.0.0.0";
 
 server.listen(PORT, HOST, () => {
   console.log(`🚀 Server is running at http://${HOST}:${PORT}`);
