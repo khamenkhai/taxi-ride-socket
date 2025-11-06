@@ -209,7 +209,9 @@ io.on("connection", (socket) => {
       rideId: string;
       location: { lat: number; lng: number };
     }) => {
-      console.log(`📍 Driver location update for ${data.rideId}: Lat ${data.location.lat}`); // Too verbose for frequent updates
+      console.log(
+        `📍 Driver location update for ${data.rideId}: Lat ${data.location.lat}`
+      ); // Too verbose for frequent updates
       await ridesCollection.doc(data.rideId).set(
         {
           lastDriverLocation: data.location,
@@ -291,7 +293,7 @@ io.on("connection", (socket) => {
     try {
       await ridesCollection.doc(data.rideId).set(
         {
-          status : "cencelled",
+          status: "cencelled",
           lastCancelled: data,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
@@ -326,7 +328,7 @@ io.on("connection", (socket) => {
               socket.emit("ride:cancelled", rideData.lastCancelled);
               return;
             }
-          
+
             // Emit the last events if available
             if (rideData?.status) {
               if (rideData.status == "accepted") {
@@ -346,13 +348,25 @@ io.on("connection", (socket) => {
     }
   );
 
-  // Driver comes online
+  // ===========================================================
+  // 🟢 Driver comes online
+  // ===========================================================
   socket.on("driver:online", async (data: { driverId: string }) => {
     console.log(`🟢 Driver online: ${data.driverId}`);
+
+    // 🛑 SOLUTION: Add validation guard clause
+    if (!data.driverId) {
+      console.error(
+        "❌ ERROR: driverId is missing or invalid in driver:online event."
+      );
+      return; // Stop execution if ID is missing
+    }
+
     socket.join("drivers");
 
     try {
       await db.collection("drivers").doc(data.driverId).set(
+        // This is now safe
         {
           online: true,
           socketId: socket.id, // store socketId in Firestore
@@ -368,13 +382,25 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Driver goes offline manually
+  // ===========================================================
+  // 🔴 Driver goes offline manually
+  // ===========================================================
   socket.on("driver:offline", async (data: { driverId: string }) => {
     console.log(`🔴 Driver offline: ${data.driverId}`);
+
+    // 🛑 SOLUTION: Add validation guard clause
+    if (!data.driverId) {
+      console.error(
+        "❌ ERROR: driverId is missing or invalid in driver:offline event."
+      );
+      return; // Stop execution if ID is missing
+    }
+
     socket.leave("drivers");
 
     try {
       await db.collection("drivers").doc(data.driverId).set(
+        // This is now safe
         {
           online: false,
           socketId: null, // clear socketId
