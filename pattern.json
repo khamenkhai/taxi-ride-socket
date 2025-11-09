@@ -1,0 +1,193 @@
+{
+  "contractName": "RealTimeRideSharingService_SocketIO_Contract",
+  "version": "1.0.0",
+  "roomStructure": [
+    {
+      "pattern": "[userId]",
+      "purpose": "Personal Room",
+      "members": "Individual Riders and Drivers. Used for initial join and personal notifications (e.g., ride timeout)."
+    },
+    {
+      "pattern": "[driverId]",
+      "purpose": "Global Driver Room",
+      "members": "All Online Drivers. Used for broadcasting new ride requests globally."
+    },
+    {
+      "pattern": "[rideSocketRoomId]",
+      "purpose": "Ride Room",
+      "members": "The dedicated room for an active ride. Joined by the Rider and the Accepted Driver. Used for ride-specific updates. like update ride status and driver location real time"
+    }
+  ],
+  "events": [
+    {
+      "name": "user:join",
+      "direction": "Client(Flutter)_To_Server",
+      "targetRoom": "N/A",
+      "description": "Client joins their personal room and, if a driver, the 'drivers' room.",
+      "payload": {
+        "userId": "string",
+        "type": "'rider' | 'driver'"
+      }
+    },
+    {
+      "name": "user:reconnect",
+      "direction": "Client(Flutter)_To_Server",
+      "targetRoom": "N/A",
+      "description": "Used after a disconnect. Client rejoins rooms, and server re-sends last known status/location if rideSocketRoomId is present.",
+      "payload": {
+        "userId": "string",
+        "type": "'rider' | 'driver'",
+        "rideSocketRoomId": "string (optional)"
+      }
+    },
+    {
+      "name": "driver:online",
+      "direction": "Client(Flutter)_To_Server",
+      "targetRoom": "N/A",
+      "description": "Driver marks themselves as online. Server updates db.",
+      "payload": {
+        "driverId": "string"
+      }
+    },
+    {
+      "name": "driver:offline",
+      "direction": "Client(Flutter)_To_Server",
+      "targetRoom": "N/A",
+      "description": "Driver manually marks themselves offline. Server removes driver from 'drivers' room.",
+      "payload": {
+        "driverId": "string"
+      }
+    },
+    {
+      "name": "driver:statusUpdate",
+      "direction": "Server_To_Client",
+      "targetRoom": "Global Broadcast",
+      "description": "Notifies all clients when a driver's online/offline status changes.",
+      "payload": {
+        "driverId": "string",
+        "online": "boolean"
+      }
+    },
+
+
+    {
+      "name": "ride:request",
+      "direction": "Server_To_Server",
+      "targetRoom": "N/A",
+      "description": "Rider submits a new ride request. Server saves status, joins rider to [rideSocketRoomId], and broadcasts.",
+      "payload": {
+        "riderId": "string",
+        "rideSocketRoomId": "string"
+      }
+    },
+    {
+      "name": "ride:requested",
+      "direction": "Server_To_Client",
+      "targetRoom": "[rideSocketRoomId] AND individual driver sockets",
+      "description": "Broadcasts the new request. to send 'ride status : requested' into ride socket room.",
+      "payload": "Same as 'ride:request' payload."
+    },
+    {
+      "name": "ride:accept",
+      "direction": "Client(Flutter)_To_Server",
+      "targetRoom": "N/A",
+      "description": "Driver accepts the ride. Server clears timeout, joins driver to [rideSocketRoomId], and updates db.",
+      "payload": {
+        "rideId": "string",
+        "driverLocation": "{ lat: number; lng: number }",
+        "driverId": "string",
+        "riderId": "string",
+        "rideSocketRoomId": "string"
+      }
+    },
+    {
+      "name": "ride:accepted",
+      "direction": "Server_To_Client",
+      "targetRoom": "[rideSocketRoomId]",
+      "description": "Confirms acceptance to the Rider and Driver in the ride room.",
+      "payload": {
+        "rideId": "string",
+        "driverLocation": "{ lat: number; lng: number }",
+        "rideSocketRoomId": "string"
+      }
+    },
+    {
+      "name": "ride:timeout",
+      "direction": "Server_To_Client",
+      "targetRoom": "[riderId] AND [rideSocketRoomId]",
+      "description": "Sent if no driver accepts within the allotted time.",
+      "payload": {
+        "rideSocketRoomId": "string",
+        "message": "string"
+      }
+    },
+    {
+      "name": "ride:join",
+      "direction": "Client(Flutter)_To_Server",
+      "targetRoom": "N/A",
+      "description": "Explicit call for either client (Rider/Driver) to join the active ride room.",
+      "payload": {
+        "rideSocketRoomId": "string",
+        "rideId": "string (optional)"
+      }
+    },
+    {
+      "name": "driver:location",
+      "direction": "Client(Flutter)_To_Server",
+      "targetRoom": "N/A",
+      "description": "Driver sends their real-time location. Server updates db and broadcasts.",
+      "payload": {
+        "rideId": "string",
+        "rideSocketRoomId": "string",
+        "location": "{ lat: number; lng: number }"
+      }
+    },
+    {
+      "name": "ride:driverLocation",
+      "direction": "Server_To_Client",
+      "targetRoom": "[rideSocketRoomId]",
+      "description": "Broadcasts the Driver's location to the Rider.",
+      "payload": {
+        "lat": "number",
+        "lng": "number"
+      }
+    },
+    {
+      "name": "ride:status",
+      "direction": "Client(Flutter)_To_Server",
+      "targetRoom": "N/A",
+      "description": "Driver sends a ride progress update.",
+      "payload": {
+        "rideId": "string",
+        "rideSocketRoomId": "string",
+        "status": "'driverArrived' | 'inProgress' | 'completed' | 'cancelled'"
+      }
+    },
+    {
+      "name": "ride:status",
+      "direction": "Server_To_Client",
+      "targetRoom": "[rideSocketRoomId]",
+      "description": "Broadcasts the new ride status to the ride room.",
+      "payload": "string (The new status, e.g., 'driverArrived')"
+    },
+    {
+      "name": "ride:cancel",
+      "direction": "Client(Flutter)_To_Server",
+      "targetRoom": "N/A",
+      "description": "Sent by either party to cancel the ride.",
+      "payload": {
+        "rideId": "string",
+        "rideSocketRoomId": "string",
+        "cancellationReason": "string (optional)",
+        "cancelledBy": "'driver' | 'rider'"
+      }
+    },
+    {
+      "name": "ride:cancelled",
+      "direction": "Server_To_Client",
+      "targetRoom": "[rideSocketRoomId]",
+      "description": "Broadcasts the cancellation details to the ride room.",
+      "payload": "Same as 'ride:cancel' payload."
+    }
+  ]
+}
