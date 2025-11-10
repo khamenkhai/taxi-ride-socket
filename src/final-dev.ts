@@ -2,7 +2,7 @@ import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 import admin from "firebase-admin";
-import { serviceAccount } from "./service-account";
+import { serviceAccount } from "./secrets";
 
 // Map<rideRequestId, NodeJS.Timeout>
 const pendingRideRequests: Map<string, NodeJS.Timeout> = new Map();

@@ -14,3 +14,7 @@ export const serviceAccount: any = {
     "https://www.googleapis.com/robot/v1/metadata/x509/project2-service-account%40project2-f5cb2.iam.gserviceaccount.com",
   universe_domain: "googleapis.com",
 };
+
+
+export const upstashUrl = "https://witty-moth-5341.upstash.io";
+export const upstashKey = "ARTdAAImcDIzYmY1Y2U4ZjdjZjg0NmRjYWJkZjljZjRlYjdmZGQxY3AyNTM0MQ";
