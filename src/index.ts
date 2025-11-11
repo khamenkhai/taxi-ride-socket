@@ -441,7 +441,7 @@ io.on("connection", (socket: Socket) => {
 // 🚀 Start the server
 // ===========================================================
 const PORT = 3000;
-const HOST = "192.168.100.81";
+const HOST = "0.0.0.0";
 
 server.listen(PORT, HOST, () => {
   console.log(`🚀 Server is running at http://${HOST}:${PORT}`);
