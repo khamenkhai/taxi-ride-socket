@@ -148,7 +148,7 @@ io.on("connection", (socket: Socket) => {
     console.log(`🔗 Rider joining ride room with roomToken: ${roomToken}`);
 
     try {
-      // 2️⃣ Set initial status in Redis
+      // 2️⃣ Set initial status in cache
       await updateRideInRedis(roomToken, {
         ...rideRequestData,
         status: "requested",
@@ -159,7 +159,6 @@ io.on("connection", (socket: Socket) => {
       io.to(roomToken).emit("ride:requested", rideRequestData);
       console.log(`📢 Broadcasted status 'requested' to room ${roomToken}.`);
 
-      // 4️⃣ Find and notify online drivers
       // 4️⃣ Find and notify online drivers
       const driverKeys = await redis.keys("driver:*");
       const onlineDrivers: { id: string; socketId: string }[] = [];
@@ -172,10 +171,11 @@ io.on("connection", (socket: Socket) => {
           return;
         }
 
-        // DEBUGGING: Log the driver data we retrieve from Redis
+        // DEBUGGING: Log the driver data we retrieve from cache
         console.log(`[DEBUG] Checking Driver Key: ${key}, Data:`, driver);
 
-        if (String(driver?.online) === "true" && driver.socketId) {
+        if (5 == 5) {
+          // if (String(driver?.online) === "true" && driver.socketId) {
           // if (driver?.online === "true" && driver.socketId) {
           onlineDrivers.push({
             id: key.replace("driver:", ""),
@@ -203,7 +203,7 @@ io.on("connection", (socket: Socket) => {
           io.to(riderId).emit("ride:timeout", timeoutPayload); // Notify the individual rider
           io.to(roomToken).emit("ride:timeout", timeoutPayload); // Notify the ride room
 
-          // Update Redis status to timedOut
+          // Update cache status to timedOut
           await updateRideInRedis(roomToken, { status: "timedOut" });
 
           pendingRideRequests.delete(rideRequestId);
@@ -252,7 +252,7 @@ io.on("connection", (socket: Socket) => {
       io.to(roomToken).emit("ride:accepted", acceptedPayload);
       console.log(`✉️ Sent 'ride:accepted' to ride room: ${roomToken}`);
 
-      // 4️⃣ Update Redis
+      // 4️⃣ Update cache
       await updateRideInRedis(roomToken, { status: "accepted", driverId });
     } catch (error) {
       console.error("❌ ERROR in ride:accept handler:", error);
@@ -277,7 +277,7 @@ io.on("connection", (socket: Socket) => {
     }
 
     try {
-      // Update Redis
+      // Update cache
       await updateRideInRedis(data.roomToken, {
         lastDriverLocation: JSON.stringify(data.location),
       });
@@ -301,7 +301,7 @@ io.on("connection", (socket: Socket) => {
     );
 
     try {
-      // Update Redis
+      // Update cache
       await updateRideInRedis(data.roomToken, { status: data.status });
 
       // Broadcast to ride room
