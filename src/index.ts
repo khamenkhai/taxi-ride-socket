@@ -1,15 +1,16 @@
 import express from "express";
 import http from "http";
 import { Server, Socket } from "socket.io";
-// 🚨 NOTE: Firebase imports are removed and replaced with Redis setup
-import { Redis } from "@upstash/redis"; // Using @upstash/redis for a modern client
+import dotenv from 'dotenv';
+import { Redis } from "@upstash/redis"; 
 import { upstashKey, upstashUrl } from "./secrets";
+dotenv.config();
 
 // ===========================================================
 // ⚙️ CONFIGURATION & CONSTANTS
 // ===========================================================
 const PORT = 3000;
-const HOST = "192.168.100.81";
+const HOST = process.env.HOST || "0.0.0.0";
 const RIDE_REQUEST_TIMEOUT_MS = 300000;
 const DRIVERS_ROOM = "drivers";
 
@@ -481,11 +482,17 @@ io.on("connection", (socket) => {
           const status = rideData.status as RideStatus;
 
           // 🛠️ FIX 1: Safely check type and parse 'lastDriverLocation'
-          const lastDriverLocation =
-            rideData.lastDriverLocation &&
-            typeof rideData.lastDriverLocation === "string"
-              ? (JSON.parse(rideData.lastDriverLocation) as Location)
-              : null;
+          // const lastDriverLocation =
+          //   rideData.lastDriverLocation &&
+          //   typeof rideData.lastDriverLocation === "string"
+          //     ? (JSON.parse(rideData.lastDriverLocation) as Location)
+          //     : null;
+
+          const lastDriverLocation = parseLocation(rideData.lastDriverLocation);
+
+          console.log("*******************************");
+          console.log(JSON.stringify(rideData));
+          console.log("*******************************");
 
           // 🛠️ FIX 2: Safely check type for 'lastCancelled' before proceeding
           if (
@@ -511,14 +518,17 @@ io.on("connection", (socket) => {
           }
 
           if (lastDriverLocation) {
+            console.log("🤝 => Driver location is reemitted:");
             socket.emit("ride:driverLocation", lastDriverLocation);
+          } else {
+            console.log("🤝 => Last driver location not found");
           }
         }
       } catch (error) {
         // If the error is a JSON parse error, log the potentially corrupted data for debugging
         if (error instanceof SyntaxError) {
           console.error(
-            "❌ JSON Parse Error on Reconnect. Corrupted ride data:",
+            "❌ JSON Parse Error on Reconnect. Corrupted ride data:"
             // rideData
           );
         }
@@ -600,3 +610,24 @@ io.on("connection", (socket) => {
 server.listen(PORT, HOST, () => {
   console.log(`🚀 Server is running at http://${HOST}:${PORT}`);
 });
+
+const parseLocation = (value: any): Location | null => {
+  if (!value) return null;
+
+  // If already object
+  if (typeof value === "object") {
+    return value as Location;
+  }
+
+  // If string → parse it
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as Location;
+    } catch (e) {
+      console.error("Invalid JSON for location:", value);
+      return null;
+    }
+  }
+
+  return null;
+};
