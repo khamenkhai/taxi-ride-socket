@@ -1,15 +1,14 @@
 import express from "express";
 import http from "http";
 import { Server, Socket } from "socket.io";
-// 🚨 NOTE: Firebase imports are removed and replaced with Redis setup
-import { Redis } from "@upstash/redis"; // Using @upstash/redis for a modern client
-import { upstashKey, upstashUrl } from "./secrets";
+import admin from "firebase-admin";
+import { serviceAccount } from "./secrets";
 
 // ===========================================================
 // ⚙️ CONFIGURATION & CONSTANTS
 // ===========================================================
 const PORT = 3000;
-const HOST = "192.168.100.81";
+const HOST = "192.168.100.81"; 
 const RIDE_REQUEST_TIMEOUT_MS = 300000;
 const DRIVERS_ROOM = "drivers";
 
@@ -31,122 +30,77 @@ interface Location {
 
 // --- Event Payloads ---
 // (Interfaces remain the same for strict typing)
-interface UserJoinData {
-  userId: string;
-  type: UserType;
-}
-interface RideRequestData extends Record<string, any> {
-  riderId: string;
-  roomToken: string;
-}
-interface RideAcceptData {
-  roomToken: string;
-  rideId: string;
-  driverLocation: Location;
-  driverId: string;
-  riderId: string;
-}
-interface RideJoinData {
-  roomToken: string;
-  rideId?: string;
-}
-interface DriverLocationData {
-  rideId: string;
-  roomToken: string;
-  location: Location;
-}
-interface RideStatusPayload {
-  rideId: string;
-  driverId?: string;
-  roomToken: string;
-  status: RideStatus;
-}
-interface RideCancelData {
-  rideId: string;
-  roomToken: string;
-  cancellationReason?: string;
-  cancelledBy: "driver" | "rider";
-}
-interface UserReconnectData {
-  userId: string;
-  type: UserType;
-  roomToken?: string;
-}
-interface DriverOnlineData {
-  driverId: string;
-}
-interface DriverOfflineData {
-  driverId: string;
-}
+interface UserJoinData { userId: string; type: UserType; }
+interface RideRequestData extends Record<string, any> { riderId: string; roomToken: string; }
+interface RideAcceptData { roomToken: string; rideId: string; driverLocation: Location; driverId: string; riderId: string; }
+interface RideJoinData { roomToken: string; rideId?: string; }
+interface DriverLocationData { rideId: string; roomToken: string; location: Location; }
+interface RideStatusPayload { rideId: string; driverId?: string; roomToken: string; status: RideStatus; }
+interface RideCancelData { rideId: string; roomToken: string; cancellationReason?: string; cancelledBy: "driver" | "rider"; }
+interface UserReconnectData { userId: string; type: UserType; roomToken?: string; }
+interface DriverOnlineData { driverId: string; }
+interface DriverOfflineData { driverId: string; }
+
 
 // ===========================================================
 // 🛠️ SERVER LOGIC SETUP
 // ===========================================================
 const pendingRideRequests: Map<string, NodeJS.Timeout> = new Map();
 
-// 🚨 REDIS SETUP (Replace Firebase Admin Init)
-console.log("🔥 Initializing Upstash Redis...");
-// Replace with your actual Upstash Redis URL and Token
-const redis = new Redis({
-  url: upstashUrl,
-  token: upstashKey,
+console.log("🔥 Initializing Firebase Admin...");
+// @ts-ignore
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
 });
-console.log("✅ Upstash Redis initialized.");
+console.log("✅ Firebase Admin initialized.");
 
-// --- Redis Key Constants ---
-const RIDES_KEY = (roomToken: string) => `ride:${roomToken}`;
-const DRIVER_KEY = (driverId: string) => `driver:${driverId}`;
-const ONLINE_DRIVERS_SET = "drivers:online";
+const db = admin.firestore();
+const ridesCollection = db.collection("rides");
+const driversCollection = db.collection("drivers");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 console.log("🌐 Socket.IO Server and CORS configured.");
+console.log("📚 Firestore collections referenced.");
+
 
 // ===========================================================
 // 💡 UTILITY FUNCTIONS (DRY Principle)
 // ===========================================================
 
 /**
- * Gets the current server timestamp in milliseconds.
- * (Equivalent to Firebase's FieldValue.serverTimestamp())
- */
-const serverTimestamp = () => Date.now();
-
-/**
- * Updates the ride status and related data in Redis.
+ * Updates the ride status and related data in Firestore.
  */
 const updateRideStatus = async (
   roomToken: string,
   status: RideStatus,
   additionalData: Record<string, any> = {}
 ) => {
-  console.log(`💾 Updating Redis status for ${roomToken}: ${status}...`);
-  const rideKey = RIDES_KEY(roomToken);
-  const now = serverTimestamp();
-
-  // Create the base update payload
+  console.log(`💾 Updating Firestore status for ${roomToken}: ${status}...`);
   const updatePayload: Record<string, any> = {
-    status: status,
-    updatedAt: now,
+    status,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     ...additionalData,
   };
 
   try {
-    // Check if the ride document exists
-    const exists = await redis.exists(rideKey);
-
-    if (exists) {
-      // Use hset for existing documents
-      await redis.hset(rideKey, updatePayload);
+    const rideDoc = await ridesCollection.doc(roomToken).get();
+    
+    if (rideDoc.exists) {
+      // Use update for existing documents
+      await ridesCollection.doc(roomToken).update(updatePayload);
     } else {
-      // Use hset for new documents, ensuring creation time is set
-      await redis.hset(rideKey, {
-        ...updatePayload,
-        createdAt: now,
-      });
+      // Use set with merge:true for new documents, ensuring creation time is set
+      await ridesCollection.doc(roomToken).set(
+        {
+          ...updatePayload,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
     }
-    console.log("✔️ Redis update successful.");
+    console.log("✔️ Firestore update successful.");
   } catch (error) {
     console.error(`❌ ERROR updating ride status for ${roomToken}:`, error);
     throw error;
@@ -173,17 +127,20 @@ const broadcastRideStatus = (
     payload.driverId = driverId;
   }
 
-  console.log(`📢 Broadcasting status '${status}' to room ${roomToken}.`);
+  console.log(
+    `📢 Broadcasting status '${status}' to room ${roomToken}.`
+  );
   // Target the room directly using io.to(roomToken)
   socketIoInstance.to(roomToken).emit("ride:status", payload);
 };
+
 
 // ===========================================================
 // 🔌 SOCKET EVENT HANDLERS
 // ===========================================================
 
 /**
- * DRY function to handle driver online/offline status updates in Redis.
+ * DRY function to handle driver online/offline status updates in Firestore.
  */
 const updateDriverStatus = async (
   driverId: string,
@@ -192,42 +149,31 @@ const updateDriverStatus = async (
   socket: Socket
 ) => {
   if (!driverId) {
-    console.error(
-      "❌ ERROR: driverId is missing or invalid in driver status event."
-    );
+    console.error("❌ ERROR: driverId is missing or invalid in driver status event.");
     return;
   }
 
-  const driverKey = DRIVER_KEY(driverId);
-  const now = serverTimestamp();
-
   const payload: Record<string, any> = {
-    online: online ? "true" : "false", // Store booleans as strings in Redis Hash
-    socketId: currentSocketId ?? "",
-    updatedAt: now.toString(),
+    online,
+    socketId: currentSocketId,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   };
 
   if (online) {
-    payload.lastOnline = now.toString();
+    payload.lastOnline = admin.firestore.FieldValue.serverTimestamp();
     socket.join(DRIVERS_ROOM);
-    // Add driverId to the set of online drivers
-    await redis.sadd(ONLINE_DRIVERS_SET, driverId);
   } else {
-    payload.lastOffline = now.toString();
+    payload.lastOffline = admin.firestore.FieldValue.serverTimestamp();
     socket.leave(DRIVERS_ROOM);
-    // Remove driverId from the set of online drivers
-    await redis.srem(ONLINE_DRIVERS_SET, driverId);
   }
 
   try {
-    // Use hset for cleaner updates on driver doc
-    await redis.hset(driverKey, payload);
+    // Use set with merge:true for cleaner updates on driver doc
+    await driversCollection.doc(driverId).set(payload, { merge: true });
 
     // Broadcast to everyone (or specific groups if needed)
     io.emit("driver:statusUpdate", { driverId, online });
-    console.log(
-      `📢 Driver ${driverId} marked as ${online ? "online" : "offline"}`
-    );
+    console.log(`📢 Driver ${driverId} marked as ${online ? "online" : "offline"}`);
   } catch (error) {
     console.error(`❌ Error setting driver status for ${driverId}:`, error);
   }
@@ -245,8 +191,6 @@ io.on("connection", (socket) => {
     socket.join(data.userId);
 
     if (data.type === "driver") {
-      // Driver status will be set via 'driver:online' event,
-      // but we join the room here for simplicity.
       socket.join(DRIVERS_ROOM);
       console.log(`🚕 Driver ${data.userId} joined ${DRIVERS_ROOM} room.`);
     }
@@ -257,9 +201,7 @@ io.on("connection", (socket) => {
   // 2. RIDE REQUEST FLOW
   // ===========================================================
   socket.on("ride:request", async (rideRequestData: RideRequestData) => {
-    console.log(
-      `📲 New ride request received from rider: ${rideRequestData.riderId}`
-    );
+    console.log(`📲 New ride request received from rider: ${rideRequestData.riderId}`);
 
     const { roomToken, riderId } = rideRequestData;
 
@@ -268,29 +210,18 @@ io.on("connection", (socket) => {
       socket.join(roomToken);
       console.log(`🔗 Rider joined ride room: ${roomToken}`);
 
-      // 2️⃣ Set initial status in Redis
+      // 2️⃣ Set initial status in Firestore
       await updateRideStatus(roomToken, "requested", rideRequestData);
 
       // 3️⃣ Emit status to rider (and room) using consolidated event
       broadcastRideStatus(roomToken, "requested", roomToken, "", io); // Passing roomToken as rideId
 
-      // 4️⃣ Get all online drivers (using the Redis SET) and send the request
-      const onlineDriverIds = await redis.smembers(ONLINE_DRIVERS_SET);
+      // 4️⃣ Get all online drivers and send the request
+      const snapshot = await driversCollection.where("online", "==", true).get();
 
-      if (onlineDriverIds && onlineDriverIds.length > 0) {
-        // Fetch socketId for all online drivers in one go (or iterate)
-        const driverKeys = onlineDriverIds.map(DRIVER_KEY);
-        const driverDataList = await Promise.all(
-          driverKeys.map((key) => redis.hgetall(key))
-        );
-
-        for (let i = 0; i < driverDataList.length; i++) {
-          const driverData = driverDataList[i];
-          const driverId = onlineDriverIds[i];
-
-          // Data in Redis Hash is stored as strings, so we access properties directly
-          const driverSocketId = driverData?.socketId as string;
-
+      if (!snapshot.empty) {
+        snapshot.docs.forEach((doc) => {
+          const driverSocketId = doc.data().socketId;
           if (driverSocketId) {
             // Send request payload directly to driver's socket
             io.to(driverSocketId).emit("ride:status", {
@@ -298,20 +229,16 @@ io.on("connection", (socket) => {
               roomToken: roomToken,
               status: "requested",
             } as RideStatusPayload);
-            console.log(`📡 Ride request sent to driver ${driverId}`);
+            console.log(`📡 Ride request sent to driver ${doc.id}`);
           }
-        }
+        });
 
         // 5️⃣ Start timeout
         const timer = setTimeout(async () => {
           console.log(`⏰ Ride request ${roomToken} timed out!`);
 
-          // Notify rider, update room, and Redis
-          const timeoutPayload: RideStatusPayload = {
-            rideId: roomToken,
-            roomToken,
-            status: "timedOut",
-          };
+          // Notify rider, update room, and Firestore
+          const timeoutPayload: RideStatusPayload = { rideId: roomToken, roomToken, status: "timedOut" };
           io.to(riderId).emit("ride:status", timeoutPayload); // Notify rider specifically
           broadcastRideStatus(roomToken, "timedOut", roomToken, "", io); // Notify room
           await updateRideStatus(roomToken, "timedOut");
@@ -334,8 +261,7 @@ io.on("connection", (socket) => {
   socket.on("ride:accept", async (data: RideAcceptData) => {
     const { roomToken, rideId, driverId, driverLocation } = data;
 
-    if (!roomToken)
-      return console.error("❌ ERROR: roomToken missing in ride:accept.");
+    if (!roomToken) return console.error("❌ ERROR: roomToken missing in ride:accept.");
 
     console.log(`💚 Ride ACCEPT received: ${roomToken}`);
 
@@ -355,12 +281,11 @@ io.on("connection", (socket) => {
       // 3️⃣ Notify using consolidated ride status event
       broadcastRideStatus(roomToken, "accepted", rideId, driverId, io);
 
-      // 4️⃣ Update Redis
+      // 4️⃣ Update Firestore
       await updateRideStatus(roomToken, "accepted", {
-        rideId,
+        rideId, // Storing the rideId if it differs from roomToken, otherwise redundancy is fine.
         driverId,
-        // Stringify the object for storage in Redis Hash
-        driverLocation: JSON.stringify(driverLocation),
+        driverLocation,
       });
 
       console.log("✅ Ride status updated to 'accepted'.");
@@ -374,9 +299,8 @@ io.on("connection", (socket) => {
   // ===========================================================
 
   socket.on("ride:join", (data: RideJoinData) => {
-    if (!data.roomToken)
-      return console.error("❌ ERROR: roomToken missing in ride:join.");
-
+    if (!data.roomToken) return console.error("❌ ERROR: roomToken missing in ride:join.");
+    
     console.log(`🤝 Request to join ride room: ${data.roomToken}`);
     socket.join(data.roomToken);
     console.log(`✅ ${socket.id} joined ride room: ${data.roomToken}`);
@@ -384,17 +308,16 @@ io.on("connection", (socket) => {
 
   socket.on("driver:location", async (data: DriverLocationData) => {
     const { roomToken, location } = data;
-    if (!roomToken)
-      return console.error("❌ ERROR: roomToken missing in driver:location.");
+    if (!roomToken) return console.error("❌ ERROR: roomToken missing in driver:location.");
 
-    // Update Redis (less frequent)
+    // Update Firestore (less frequent)
     try {
-      await redis.hset(RIDES_KEY(roomToken), {
-        lastDriverLocation: JSON.stringify(location),
-        updatedAt: serverTimestamp().toString(),
-      });
+      await ridesCollection.doc(roomToken).set(
+        { lastDriverLocation: location, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+        { merge: true }
+      );
     } catch (error) {
-      console.error("❌ Error updating driver location in Redis:", error);
+      console.error("❌ Error updating driver location in Firestore:", error);
     }
 
     // Broadcast to ride room (high frequency)
@@ -404,18 +327,15 @@ io.on("connection", (socket) => {
   socket.on("ride:updateStatus", async (data: RideStatusPayload) => {
     const { roomToken, status, rideId, driverId } = data;
 
-    if (!roomToken)
-      return console.error("❌ ERROR: roomToken missing in ride:updateStatus.");
+    if (!roomToken) return console.error("❌ ERROR: roomToken missing in ride:updateStatus.");
 
     console.log(`🔄 Status update for ${roomToken}: ${status}`);
 
     try {
       const additionalData: Record<string, any> = {};
 
-      if (status === "accepted" && driverId)
-        additionalData["driverId"] = driverId;
-      if (status === "cancelled")
-        additionalData["lastCancelled"] = Date.now().toString();
+      if (status === "accepted" && driverId) additionalData["driverId"] = driverId;
+      if (status === "cancelled") additionalData["lastCancelled"] = Date.now().toString();
 
       await updateRideStatus(roomToken, status, additionalData);
 
@@ -423,18 +343,14 @@ io.on("connection", (socket) => {
       broadcastRideStatus(roomToken, status, rideId, driverId, io);
       console.log("✅ Status broadcast complete.");
     } catch (error) {
-      console.error(
-        `❌ ERROR processing ride:updateStatus for ${roomToken}:`,
-        error
-      );
+      console.error(`❌ ERROR processing ride:updateStatus for ${roomToken}:`, error);
     }
   });
 
   socket.on("ride:cancel", async (data: RideCancelData) => {
     const { roomToken, rideId } = data;
 
-    if (!roomToken)
-      return console.error("❌ ERROR: roomToken missing in ride:cancel.");
+    if (!roomToken) return console.error("❌ ERROR: roomToken missing in ride:cancel.");
 
     // 1️⃣ Clear timeout if pending
     const timer = pendingRideRequests.get(roomToken);
@@ -445,11 +361,8 @@ io.on("connection", (socket) => {
     }
 
     try {
-      // 2️⃣ Update Redis
-      await updateRideStatus(roomToken, "cancelled", {
-        // Stringify the object for storage in Redis Hash
-        lastCancelled: JSON.stringify(data),
-      });
+      // 2️⃣ Update Firestore
+      await updateRideStatus(roomToken, "cancelled", { lastCancelled: data });
 
       // 3️⃣ Emit using consolidated ride status event
       broadcastRideStatus(roomToken, "cancelled", rideId, "", io);
@@ -473,27 +386,12 @@ io.on("connection", (socket) => {
       console.log(`🚪 Rejoined room: ${data.roomToken}`);
 
       try {
-        const rideData = await redis.hgetall(RIDES_KEY(data.roomToken));
+        const rideDoc = await ridesCollection.doc(data.roomToken).get();
+        if (rideDoc.exists) {
+          const rideData = rideDoc.data();
+          const currentRideId = rideData?.rideId || data.roomToken; // Fallback to roomToken
 
-        if (rideData) {
-          // Convert stringified data back to objects/expected types
-          const currentRideId = rideData.rideId || data.roomToken;
-          const status = rideData.status as RideStatus;
-
-          // 🛠️ FIX 1: Safely check type and parse 'lastDriverLocation'
-          const lastDriverLocation =
-            rideData.lastDriverLocation &&
-            typeof rideData.lastDriverLocation === "string"
-              ? (JSON.parse(rideData.lastDriverLocation) as Location)
-              : null;
-
-          // 🛠️ FIX 2: Safely check type for 'lastCancelled' before proceeding
-          if (
-            rideData.lastCancelled &&
-            typeof rideData.lastCancelled === "string"
-          ) {
-            // Note: We don't need to parse lastCancelled just to emit the cancelled status
-            // because the payload doesn't require the cancellation details object itself.
+          if (rideData?.lastCancelled) {
             socket.emit("ride:status", {
               rideId: currentRideId,
               roomToken: data.roomToken,
@@ -502,30 +400,24 @@ io.on("connection", (socket) => {
             return;
           }
 
-          if (status) {
+          if (rideData?.status) {
             socket.emit("ride:status", {
               rideId: currentRideId,
               roomToken: data.roomToken,
-              status: status,
+              status: rideData.status as RideStatus,
             } as RideStatusPayload);
           }
 
-          if (lastDriverLocation) {
-            socket.emit("ride:driverLocation", lastDriverLocation);
+          if (rideData?.lastDriverLocation) {
+            socket.emit("ride:driverLocation", rideData.lastDriverLocation);
           }
         }
       } catch (error) {
-        // If the error is a JSON parse error, log the potentially corrupted data for debugging
-        if (error instanceof SyntaxError) {
-          console.error(
-            "❌ JSON Parse Error on Reconnect. Corrupted ride data:",
-            // rideData
-          );
-        }
         console.error("Error fetching last ride events on reconnect:", error);
       }
     }
   });
+  
   // ===========================================================
   // 6. DRIVER ONLINE/OFFLINE
   // ===========================================================
@@ -546,47 +438,21 @@ io.on("connection", (socket) => {
     console.log(`🚪❌ User disconnected: ${socket.id}`);
 
     try {
-      // 🚨 REDIS NOTE: Redis doesn't have a direct index on 'socketId',
-      // so this logic is simplified/changed. The 'updateDriverStatus'
-      // logic is already called when a driver explicitly goes offline.
-      // For a disconnect, we must find the driver by socketId.
+      const snapshot = await driversCollection
+        .where("socketId", "==", socket.id)
+        .limit(1)
+        .get();
 
-      // A full Redis solution might use an additional index (socketId:driverId)
-      // but for simplicity, we rely on the `driver:offline` event or
-      // a more complex scan/key iteration, which is generally discouraged in a busy server.
+      if (!snapshot.empty) {
+        const doc = snapshot.docs[0];
+        const driverId = doc.id;
 
-      // For now, we will assume a driver must send `driver:offline` or their status
-      // will be managed by heartbeats/session management *outside* this disconnect handler.
-      // However, to replicate the original logic of finding the driver by socketId, we'll
-      // check the key that maps the socketId to driverId if we had one.
+        // Use the DRY function to update status
+        // Pass a dummy socket instance if the original is gone, but here we use the disconnect socket
+        // Note: For 'disconnect', the socket is still available for status updates
+        await updateDriverStatus(driverId, false, null, socket); 
 
-      // Since we don't have that index key, we will search for the driver by iterating over
-      // the list of online drivers, which is the closest and most efficient alternative here.
-
-      // 1. Get all online drivers
-      const onlineDriverIds = await redis.smembers(ONLINE_DRIVERS_SET);
-
-      if (onlineDriverIds && onlineDriverIds.length > 0) {
-        const driverKeys = onlineDriverIds.map(DRIVER_KEY);
-        const driverDataList = await Promise.all(
-          driverKeys.map((key) => redis.hgetall(key))
-        );
-
-        // 2. Find the driver whose socketId matches the disconnected one
-        const driverIndex = driverDataList.findIndex(
-          (data) => data?.socketId === socket.id
-        );
-
-        if (driverIndex !== -1) {
-          const driverId = onlineDriverIds[driverIndex];
-
-          // Use the DRY function to update status
-          await updateDriverStatus(driverId, false, null, socket);
-
-          console.log(
-            `📢 Driver ${driverId} automatically marked offline on disconnect`
-          );
-        }
+        console.log(`📢 Driver ${driverId} automatically marked offline on disconnect`);
       }
     } catch (error) {
       console.error("❌ Error marking driver offline on disconnect:", error);
