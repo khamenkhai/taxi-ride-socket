@@ -1,8 +1,8 @@
 import express from "express";
 import http from "http";
 import { Server, Socket } from "socket.io";
-import dotenv from 'dotenv';
-import { Redis } from "@upstash/redis"; 
+import dotenv from "dotenv";
+import { Redis } from "@upstash/redis";
 import { upstashKey, upstashUrl } from "./secrets";
 dotenv.config();
 
@@ -10,7 +10,7 @@ dotenv.config();
 // ⚙️ CONFIGURATION & CONSTANTS
 // ===========================================================
 const PORT = 3000;
-const HOST = process.env.HOST || "0.0.0.0";
+const HOST = "0.0.0.0";
 const RIDE_REQUEST_TIMEOUT_MS = 300000;
 const DRIVERS_ROOM = "drivers";
 
