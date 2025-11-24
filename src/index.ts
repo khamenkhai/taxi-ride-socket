@@ -10,7 +10,7 @@ dotenv.config();
 // ⚙️ CONFIGURATION & CONSTANTS
 // ===========================================================
 const PORT = 3000;
-const HOST = "0.0.0.0";
+const HOST = process.env.HOST || "0.0.0.0";
 const RIDE_REQUEST_TIMEOUT_MS = 300000;
 const DRIVERS_ROOM = "drivers";
 
@@ -31,47 +31,43 @@ interface Location {
 }
 
 // --- Event Payloads ---
-// (Interfaces remain the same for strict typing)
+// (Interfaces updated to use a single rideId)
 interface UserJoinData {
   userId: string;
   type: UserType;
 }
 interface RideRequestData extends Record<string, any> {
   riderId: string;
-  roomToken: string;
+  rideId: string; // previously roomToken
 }
 interface RideAcceptData {
-  roomToken: string;
   rideId: string;
   driverLocation: Location;
   driverId: string;
   riderId: string;
 }
 interface RideJoinData {
-  roomToken: string;
-  rideId?: string;
+  rideId: string;
+  rideIdOptional?: string;
 }
 interface DriverLocationData {
   rideId: string;
-  roomToken: string;
   location: Location;
 }
 interface RideStatusPayload {
   rideId: string;
   driverId?: string;
-  roomToken: string;
   status: RideStatus;
 }
 interface RideCancelData {
   rideId: string;
-  roomToken: string;
   cancellationReason?: string;
   cancelledBy: "driver" | "rider";
 }
 interface UserReconnectData {
   userId: string;
   type: UserType;
-  roomToken?: string;
+  rideId?: string;
 }
 interface DriverOnlineData {
   driverId: string;
@@ -95,7 +91,7 @@ const redis = new Redis({
 console.log("✅ Upstash Redis initialized.");
 
 // --- Redis Key Constants ---
-const RIDES_KEY = (roomToken: string) => `ride:${roomToken}`;
+const RIDES_KEY = (rideId: string) => `ride:${rideId}`;
 const DRIVER_KEY = (driverId: string) => `driver:${driverId}`;
 const ONLINE_DRIVERS_SET = "drivers:online";
 
@@ -118,12 +114,12 @@ const serverTimestamp = () => Date.now();
  * Updates the ride status and related data in Redis.
  */
 const updateRideStatus = async (
-  roomToken: string,
+  rideId: string,
   status: RideStatus,
   additionalData: Record<string, any> = {}
 ) => {
-  console.log(`💾 Updating Redis status for ${roomToken}: ${status}...`);
-  const rideKey = RIDES_KEY(roomToken);
+  console.log(`💾 Updating Redis status for ${rideId}: ${status}...`);
+  const rideKey = RIDES_KEY(rideId);
   const now = serverTimestamp();
 
   // Create the base update payload
@@ -149,7 +145,7 @@ const updateRideStatus = async (
     }
     console.log("✔️ Redis update successful.");
   } catch (error) {
-    console.error(`❌ ERROR updating ride status for ${roomToken}:`, error);
+    console.error(`❌ ERROR updating ride status for ${rideId}:`, error);
     throw error;
   }
 };
@@ -158,15 +154,13 @@ const updateRideStatus = async (
  * Broadcasts the consolidated ride status event.
  */
 const broadcastRideStatus = (
-  roomToken: string,
+  rideId: string,
   status: RideStatus,
-  rideId: string = "",
   driverId: string = "",
-  socketIoInstance: Server | Socket
+  socketIoInstance: Server | Socket = io
 ) => {
   const payload: RideStatusPayload = {
     rideId,
-    roomToken,
     status,
   };
 
@@ -174,9 +168,9 @@ const broadcastRideStatus = (
     payload.driverId = driverId;
   }
 
-  console.log(`📢 Broadcasting status '${status}' to room ${roomToken}.`);
-  // Target the room directly using io.to(roomToken)
-  socketIoInstance.to(roomToken).emit("ride:status", payload);
+  console.log(`📢 Broadcasting status '${status}' to ride ${rideId}.`);
+  // Target the room directly using io.to(rideId)
+  socketIoInstance.to(rideId).emit("ride:status", payload);
 };
 
 // ===========================================================
@@ -262,18 +256,18 @@ io.on("connection", (socket) => {
       `📲 New ride request received from rider: ${rideRequestData.riderId}`
     );
 
-    const { roomToken, riderId } = rideRequestData;
+    const { rideId, riderId } = rideRequestData;
 
     try {
-      // 1️⃣ Rider joins the new room (roomToken is the unique request/ride ID)
-      socket.join(roomToken);
-      console.log(`🔗 Rider joined ride room: ${roomToken}`);
+      // 1️⃣ Rider joins the new room (rideId is the unique request/ride ID)
+      socket.join(rideId);
+      console.log(`🔗 Rider joined ride room: ${rideId}`);
 
       // 2️⃣ Set initial status in Redis
-      await updateRideStatus(roomToken, "requested", rideRequestData);
+      await updateRideStatus(rideId, "requested", rideRequestData);
 
       // 3️⃣ Emit status to rider (and room) using consolidated event
-      broadcastRideStatus(roomToken, "requested", roomToken, "", io); // Passing roomToken as rideId
+      broadcastRideStatus(rideId, "requested", "", io);
 
       // 4️⃣ Get all online drivers (using the Redis SET) and send the request
       const onlineDriverIds = await redis.smembers(ONLINE_DRIVERS_SET);
@@ -295,8 +289,7 @@ io.on("connection", (socket) => {
           if (driverSocketId) {
             // Send request payload directly to driver's socket
             io.to(driverSocketId).emit("ride:status", {
-              rideId: roomToken, // Use roomToken as rideId
-              roomToken: roomToken,
+              rideId: rideId,
               status: "requested",
             } as RideStatusPayload);
             console.log(`📡 Ride request sent to driver ${driverId}`);
@@ -305,22 +298,21 @@ io.on("connection", (socket) => {
 
         // 5️⃣ Start timeout
         const timer = setTimeout(async () => {
-          console.log(`⏰ Ride request ${roomToken} timed out!`);
+          console.log(`⏰ Ride request ${rideId} timed out!`);
 
           // Notify rider, update room, and Redis
           const timeoutPayload: RideStatusPayload = {
-            rideId: roomToken,
-            roomToken,
+            rideId,
             status: "timedOut",
           };
-          io.to(riderId).emit("ride:status", timeoutPayload); // Notify rider specifically
-          broadcastRideStatus(roomToken, "timedOut", roomToken, "", io); // Notify room
-          await updateRideStatus(roomToken, "timedOut");
+          io.to(riderId).emit("ride:status", timeoutPayload); 
+          broadcastRideStatus(rideId, "timedOut", "", io); // Notify room
+          await updateRideStatus(rideId, "timedOut");
 
-          pendingRideRequests.delete(roomToken);
+          pendingRideRequests.delete(rideId);
         }, RIDE_REQUEST_TIMEOUT_MS);
 
-        pendingRideRequests.set(roomToken, timer);
+        pendingRideRequests.set(rideId, timer);
       } else {
         console.log("⚠️ No online drivers found for this ride request");
       }
@@ -333,32 +325,33 @@ io.on("connection", (socket) => {
   // 3. RIDE ACCEPT FLOW
   // ===========================================================
   socket.on("ride:accept", async (data: RideAcceptData) => {
-    const { roomToken, rideId, driverId, driverLocation } = data;
+    // prefer rideId field
+    const rideId = data.rideId ;
 
-    if (!roomToken)
-      return console.error("❌ ERROR: roomToken missing in ride:accept.");
+    if (!rideId) return console.error("❌ ERROR: rideId missing in ride:accept.");
 
-    console.log(`💚 Ride ACCEPT received: ${roomToken}`);
+    const { driverId, driverLocation } = data;
+
+    console.log(`💚 Ride ACCEPT received: ${rideId}`);
 
     try {
       // 1️⃣ Clear timeout
-      const timer = pendingRideRequests.get(roomToken);
+      const timer = pendingRideRequests.get(rideId);
       if (timer) {
         clearTimeout(timer);
-        pendingRideRequests.delete(roomToken);
-        console.log(`🧹 Cleared timeout for request ${roomToken}`);
+        pendingRideRequests.delete(rideId);
+        console.log(`🧹 Cleared timeout for request ${rideId}`);
       }
 
       // 2️⃣ Driver joins the ride room
-      socket.join(roomToken);
-      console.log(`🚗 Driver ${driverId} joined room: ${roomToken}`);
+      socket.join(rideId);
+      console.log(`🚗 Driver ${driverId} joined room: ${rideId}`);
 
       // 3️⃣ Notify using consolidated ride status event
-      broadcastRideStatus(roomToken, "accepted", rideId, driverId, io);
+      broadcastRideStatus(rideId, "accepted", driverId, io);
 
       // 4️⃣ Update Redis
-      await updateRideStatus(roomToken, "accepted", {
-        rideId,
+      await updateRideStatus(rideId, "accepted", {
         driverId,
         // Stringify the object for storage in Redis Hash
         driverLocation: JSON.stringify(driverLocation),
@@ -375,22 +368,22 @@ io.on("connection", (socket) => {
   // ===========================================================
 
   socket.on("ride:join", (data: RideJoinData) => {
-    if (!data.roomToken)
-      return console.error("❌ ERROR: roomToken missing in ride:join.");
+    const rideId = data.rideId || (data.rideIdOptional as string);
+    if (!rideId) return console.error("❌ ERROR: rideId missing in ride:join.");
 
-    console.log(`🤝 Request to join ride room: ${data.roomToken}`);
-    socket.join(data.roomToken);
-    console.log(`✅ ${socket.id} joined ride room: ${data.roomToken}`);
+    console.log(`🤝 Request to join ride room: ${rideId}`);
+    socket.join(rideId);
+    console.log(`✅ ${socket.id} joined ride room: ${rideId}`);
   });
 
   socket.on("driver:location", async (data: DriverLocationData) => {
-    const { roomToken, location } = data;
-    if (!roomToken)
-      return console.error("❌ ERROR: roomToken missing in driver:location.");
+    const { rideId, location } = data;
+    if (!rideId)
+      return console.error("❌ ERROR: rideId missing in driver:location.");
 
     // Update Redis (less frequent)
     try {
-      await redis.hset(RIDES_KEY(roomToken), {
+      await redis.hset(RIDES_KEY(rideId), {
         lastDriverLocation: JSON.stringify(location),
         updatedAt: serverTimestamp().toString(),
       });
@@ -399,62 +392,59 @@ io.on("connection", (socket) => {
     }
 
     // Broadcast to ride room (high frequency)
-    io.to(roomToken).emit("ride:driverLocation", location);
+    io.to(rideId).emit("ride:driverLocation", location);
   });
 
   socket.on("ride:updateStatus", async (data: RideStatusPayload) => {
-    const { roomToken, status, rideId, driverId } = data;
+    const { rideId, status, driverId } = data;
 
-    if (!roomToken)
-      return console.error("❌ ERROR: roomToken missing in ride:updateStatus.");
+    if (!rideId)
+      return console.error("❌ ERROR: rideId missing in ride:updateStatus.");
 
-    console.log(`🔄 Status update for ${roomToken}: ${status}`);
+    console.log(`🔄 Status update for ${rideId}: ${status}`);
 
     try {
       const additionalData: Record<string, any> = {};
 
-      if (status === "accepted" && driverId)
-        additionalData["driverId"] = driverId;
-      if (status === "cancelled")
-        additionalData["lastCancelled"] = Date.now().toString();
+      if (status === "accepted" && driverId) additionalData["driverId"] = driverId;
+      if (status === "cancelled") additionalData["lastCancelled"] = Date.now().toString();
 
-      await updateRideStatus(roomToken, status, additionalData);
+      await updateRideStatus(rideId, status, additionalData);
 
       // Broadcast to ride room
-      broadcastRideStatus(roomToken, status, rideId, driverId, io);
+      broadcastRideStatus(rideId, status, driverId ?? "", io);
       console.log("✅ Status broadcast complete.");
     } catch (error) {
       console.error(
-        `❌ ERROR processing ride:updateStatus for ${roomToken}:`,
+        `❌ ERROR processing ride:updateStatus for ${rideId}:`,
         error
       );
     }
   });
 
   socket.on("ride:cancel", async (data: RideCancelData) => {
-    const { roomToken, rideId } = data;
+    const { rideId } = data;
 
-    if (!roomToken)
-      return console.error("❌ ERROR: roomToken missing in ride:cancel.");
+    if (!rideId) return console.error("❌ ERROR: rideId missing in ride:cancel.");
 
     // 1️⃣ Clear timeout if pending
-    const timer = pendingRideRequests.get(roomToken);
+    const timer = pendingRideRequests.get(rideId);
     if (timer) {
       clearTimeout(timer);
-      pendingRideRequests.delete(roomToken);
-      console.log(`🧹 Cleared timeout for cancelled request ${roomToken}`);
+      pendingRideRequests.delete(rideId);
+      console.log(`🧹 Cleared timeout for cancelled request ${rideId}`);
     }
 
     try {
       // 2️⃣ Update Redis
-      await updateRideStatus(roomToken, "cancelled", {
+      await updateRideStatus(rideId, "cancelled", {
         // Stringify the object for storage in Redis Hash
         lastCancelled: JSON.stringify(data),
       });
 
       // 3️⃣ Emit using consolidated ride status event
-      broadcastRideStatus(roomToken, "cancelled", rideId, "", io);
-      console.log(`❌ Ride cancelled broadcasted in ride room: ${roomToken}`);
+      broadcastRideStatus(rideId, "cancelled", "", io);
+      console.log(`❌ Ride cancelled broadcasted in ride room: ${rideId}`);
     } catch (error) {
       console.error("❌ Error processing ride cancellation:", error);
     }
@@ -469,24 +459,17 @@ io.on("connection", (socket) => {
     socket.join(data.userId);
     if (data.type === "driver") socket.join(DRIVERS_ROOM);
 
-    if (data.roomToken) {
-      socket.join(data.roomToken);
-      console.log(`🚪 Rejoined room: ${data.roomToken}`);
+    if (data.rideId) {
+      socket.join(data.rideId);
+      console.log(`🚪 Rejoined ride room: ${data.rideId}`);
 
       try {
-        const rideData = await redis.hgetall(RIDES_KEY(data.roomToken));
+        const rideData = await redis.hgetall(RIDES_KEY(data.rideId));
 
         if (rideData) {
           // Convert stringified data back to objects/expected types
-          const currentRideId = rideData.rideId || data.roomToken;
+          const currentRideId = rideData.rideId || data.rideId;
           const status = rideData.status as RideStatus;
-
-          // 🛠️ FIX 1: Safely check type and parse 'lastDriverLocation'
-          // const lastDriverLocation =
-          //   rideData.lastDriverLocation &&
-          //   typeof rideData.lastDriverLocation === "string"
-          //     ? (JSON.parse(rideData.lastDriverLocation) as Location)
-          //     : null;
 
           const lastDriverLocation = parseLocation(rideData.lastDriverLocation);
 
@@ -494,16 +477,14 @@ io.on("connection", (socket) => {
           console.log(JSON.stringify(rideData));
           console.log("*******************************");
 
-          // 🛠️ FIX 2: Safely check type for 'lastCancelled' before proceeding
+          // Safely check type for 'lastCancelled' before proceeding
           if (
             rideData.lastCancelled &&
             typeof rideData.lastCancelled === "string"
           ) {
-            // Note: We don't need to parse lastCancelled just to emit the cancelled status
-            // because the payload doesn't require the cancellation details object itself.
+            // We don't need to parse lastCancelled just to emit the cancelled status
             socket.emit("ride:status", {
               rideId: currentRideId,
-              roomToken: data.roomToken,
               status: "cancelled",
             } as RideStatusPayload);
             return;
@@ -512,7 +493,6 @@ io.on("connection", (socket) => {
           if (status) {
             socket.emit("ride:status", {
               rideId: currentRideId,
-              roomToken: data.roomToken,
               status: status,
             } as RideStatusPayload);
           }
@@ -529,7 +509,6 @@ io.on("connection", (socket) => {
         if (error instanceof SyntaxError) {
           console.error(
             "❌ JSON Parse Error on Reconnect. Corrupted ride data:"
-            // rideData
           );
         }
         console.error("Error fetching last ride events on reconnect:", error);
@@ -556,23 +535,6 @@ io.on("connection", (socket) => {
     console.log(`🚪❌ User disconnected: ${socket.id}`);
 
     try {
-      // 🚨 REDIS NOTE: Redis doesn't have a direct index on 'socketId',
-      // so this logic is simplified/changed. The 'updateDriverStatus'
-      // logic is already called when a driver explicitly goes offline.
-      // For a disconnect, we must find the driver by socketId.
-
-      // A full Redis solution might use an additional index (socketId:driverId)
-      // but for simplicity, we rely on the `driver:offline` event or
-      // a more complex scan/key iteration, which is generally discouraged in a busy server.
-
-      // For now, we will assume a driver must send `driver:offline` or their status
-      // will be managed by heartbeats/session management *outside* this disconnect handler.
-      // However, to replicate the original logic of finding the driver by socketId, we'll
-      // check the key that maps the socketId to driverId if we had one.
-
-      // Since we don't have that index key, we will search for the driver by iterating over
-      // the list of online drivers, which is the closest and most efficient alternative here.
-
       // 1. Get all online drivers
       const onlineDriverIds = await redis.smembers(ONLINE_DRIVERS_SET);
 
